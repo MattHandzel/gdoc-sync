@@ -1,0 +1,94 @@
+"""Google Docs/Drive OAuth2 authentication.
+
+Bring your own OAuth client (see docs/oauth-setup.md):
+
+* Client secret: ``$GDOC_SYNC_CLIENT_SECRET`` or ``~/.config/gdoc-sync/client_secret.json``
+  (``gdoc-sync auth --client <downloaded.json>`` installs it there for you).
+* Token cache: ``~/.config/gdoc-sync/token.json`` — refreshes automatically; the
+  client secret file is only needed again for a full re-consent.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+from pathlib import Path
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+
+from .config import config_dir
+
+SCOPES = [
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive",
+]
+
+OAUTH_DOC_URL = "https://github.com/MattHandzel/gdoc-sync/blob/main/docs/oauth-setup.md"
+
+
+def token_path() -> Path:
+    return config_dir() / "token.json"
+
+
+def client_secret_path() -> Path:
+    env = os.environ.get("GDOC_SYNC_CLIENT_SECRET")
+    if env:
+        return Path(env).expanduser()
+    return config_dir() / "client_secret.json"
+
+
+def install_client_secret(source: Path) -> Path:
+    """Copy a downloaded OAuth client JSON into the config dir."""
+    dest = config_dir() / "client_secret.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(source, dest)
+    dest.chmod(0o600)
+    return dest
+
+
+def get_credentials() -> Credentials:
+    """Return valid credentials, refreshing or running the OAuth flow as needed."""
+    creds = None
+    tp = token_path()
+
+    if tp.exists():
+        creds = Credentials.from_authorized_user_file(str(tp), SCOPES)
+
+    if creds and creds.valid:
+        return creds
+
+    if creds and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        tp.write_text(creds.to_json())
+        return creds
+
+    cs = client_secret_path()
+    if not cs.exists():
+        raise FileNotFoundError(
+            f"OAuth client secret not found at {cs}.\n"
+            f"Create one (Google Cloud Console → OAuth client ID, Desktop app) and run:\n"
+            f"  gdoc-sync auth --client <downloaded-client-secret.json>\n"
+            f"Full walkthrough: {OAUTH_DOC_URL}"
+        )
+
+    flow = InstalledAppFlow.from_client_secrets_file(str(cs), SCOPES)
+    creds = flow.run_local_server(port=0)
+
+    tp.parent.mkdir(parents=True, exist_ok=True)
+    tp.write_text(creds.to_json())
+    tp.chmod(0o600)
+    return creds
+
+
+def run_auth(client: str | None = None, force: bool = False) -> None:
+    """The ``gdoc-sync auth`` command."""
+    if client:
+        dest = install_client_secret(Path(client).expanduser())
+        print(f"Installed client secret at {dest}")
+    if force and token_path().exists():
+        token_path().unlink()
+        print("Removed cached token; re-running OAuth flow.")
+    get_credentials()
+    print(f"Authenticated. Token cached at {token_path()}")
