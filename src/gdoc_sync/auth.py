@@ -14,6 +14,7 @@ import os
 import shutil
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -60,9 +61,15 @@ def get_credentials() -> Credentials:
         return creds
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        tp.write_text(creds.to_json())
-        return creds
+        try:
+            creds.refresh(Request())
+            tp.write_text(creds.to_json())
+            return creds
+        except RefreshError:
+            # Dead refresh token (e.g. OAuth app in "Testing" mode expires them
+            # after ~7 days) — fall through to a fresh browser consent instead
+            # of crashing.
+            print("Stored token could not be refreshed; re-running OAuth flow...")
 
     cs = client_secret_path()
     if not cs.exists():
