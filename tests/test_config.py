@@ -36,7 +36,7 @@ def test_cli_flag_beats_env(tmp_path, monkeypatch):
 
 def test_defaults_without_config_file():
     assert config.get_font() == "Garamond"
-    assert config.get_theme() == "catppuccin-latte"
+    assert config.get_theme() == "professional"
     assert config.get_share_default() == "comment"
     assert config.get_clipboard_default() is True
 
@@ -157,3 +157,53 @@ def test_parse_share_with():
         parse_share_with("nonsense")
     with pytest.raises(ValueError):
         parse_share_with("a@b.com:owner")
+
+
+def test_default_theme_is_professional(tmp_path, monkeypatch):
+    import gdoc_sync.config as config
+
+    monkeypatch.setenv("GDOC_SYNC_CONFIG", str(tmp_path / "absent.yaml"))
+    config.set_config_override(None)
+    assert config.get_theme() == "professional"
+
+
+def test_custom_theme_from_config(tmp_path, monkeypatch):
+    import gdoc_sync.config as config
+    from gdoc_sync.style import available_themes, resolve_theme
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "defaults: {theme: acme}\n"
+        "themes:\n"
+        "  acme:\n"
+        "    text: '#111111'\n"
+        "    heading_color: '#0033aa'\n"
+    )
+    monkeypatch.setenv("GDOC_SYNC_CONFIG", str(cfg))
+    config.set_config_override(None)
+
+    assert config.get_theme() == "acme"
+    assert "acme" in available_themes()
+    palette = resolve_theme("acme")
+    assert palette["text"] == "#111111"
+    assert palette["headings"]["HEADING_1"] == "#0033aa"
+    assert palette["headings"]["HEADING_6"] == "#0033aa"
+    assert palette["background"] == "#ffffff"  # sensible fill-ins
+    # built-ins still resolve, unknown names don't
+    assert resolve_theme("professional")["pageless"] is False
+    assert resolve_theme("catppuccin-latte") is not None
+    assert resolve_theme("nope") is None
+
+
+def test_custom_theme_heading_shapes():
+    from gdoc_sync.style import _normalize_theme
+
+    by_list = _normalize_theme({"headings": ["#1", "#2", "#3"]})
+    assert by_list["headings"]["HEADING_1"] == "#1"
+    assert by_list["headings"]["HEADING_3"] == "#3"
+    assert by_list["headings"]["HEADING_6"] == "#3"  # last color extends
+    assert by_list["headings"]["TITLE"] == "#1"
+
+    by_map = _normalize_theme({"headings": {"heading_2": "#b", "TITLE": "#t"}})
+    assert by_map["headings"]["HEADING_2"] == "#b"
+    assert by_map["headings"]["TITLE"] == "#t"

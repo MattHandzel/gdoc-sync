@@ -22,13 +22,18 @@ from .services import NUM_RETRIES, get_services
 
 
 def _notify(title: str, body: str) -> None:
-    """Best-effort desktop notification."""
+    """Best-effort desktop notification (notify-send on Linux, osascript on macOS)."""
     if shutil.which("notify-send"):
-        try:
-            subprocess.run(["notify-send", title, body], timeout=5,
-                           capture_output=True)
-        except Exception:
-            pass
+        cmd = ["notify-send", title, body]
+    elif shutil.which("osascript"):
+        cmd = ["osascript", "-e",
+               f'display notification "{body}" with title "{title}"']
+    else:
+        return
+    try:
+        subprocess.run(cmd, timeout=5, capture_output=True)
+    except Exception:
+        pass
 
 
 def _mtime(path: Path) -> float:

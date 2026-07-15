@@ -2,173 +2,178 @@
 
 Sync Markdown files with Google Docs from the command line.
 
-Write in Markdown, share as a Google Doc, get comments back into your Markdown
-— without leaving the terminal.
+You write in Markdown. Your reviewers live in Google Docs. gdoc-sync moves the
+document both ways, including the comments, so nobody has to switch tools.
+
+![demo: create, pull comments, reply and resolve from the terminal](docs/assets/demo.gif)
 
 ```bash
-gdoc-sync create draft.md        # → new Google Doc, styled, shared, URL on your clipboard
-gdoc-sync push  draft.md         # local edits → the same doc (id/URL/sharing preserved)
-gdoc-sync pull  draft.md         # doc edits + reviewer comments → back into your Markdown
+gdoc-sync create draft.md   # new Google Doc: styled, shared, URL on your clipboard
+gdoc-sync push  draft.md    # local edits go to the same doc (URL and sharing survive)
+gdoc-sync pull  draft.md    # doc edits and reviewer comments come back into your Markdown
 ```
+
+Here's what a pushed doc looks like (the default `professional` theme):
+
+![a synced Google Doc with the professional theme](docs/assets/doc-screenshot.png)
 
 ## Why
 
-Google Docs is where collaborators live; Markdown + git is where your writing
-lives. Existing tools do one-way conversion or plain content sync. gdoc-sync
-also round-trips **comments** (they land in your Markdown as
+Existing tools convert one way, or sync content and drop the conversation.
+gdoc-sync round-trips **comments**: they land in your Markdown as
 [CriticMarkup](https://github.com/CriticMarkup/CriticMarkup-toolkit)
-annotations, with replies, anchored to the quoted text) and applies
-**opinionated styling** (font + color themes) so the doc you share doesn't
-look like a raw import.
-
-## Features
-
-- **create** — Markdown → new Google Doc via pandoc (headings, lists, tables,
-  code blocks, links survive). Title from your first `# H1`, YAML `title:`, or
-  the filename. The URL is printed *and copied to your clipboard*
-  (Wayland/X11/macOS), and the doc is shared **anyone-with-link-can-comment**
-  by default (`--edit`, `--view`, `--private` to change; configurable default).
-- **push** — replace the linked doc's content in place; doc id, URL, and
-  sharing are untouched. Optimistic locking: if someone edited the doc since
-  your last pull, you're warned before overwriting (`--yes` for scripts).
-- **pull** — the doc back as clean Markdown, including **multi-tab documents**,
-  with every unresolved comment (+ replies) embedded as
-  `{>>Author: comment<<}` right after the text it anchors to. Your local YAML
-  frontmatter is preserved.
-- **Styling** — a font (default Garamond) and a color theme (default
-  [Catppuccin](https://catppuccin.com) Latte; all four flavors ship) applied
-  document-wide on every create/push: rainbow-by-level heading colors, themed
-  links, page background, pageless layout. Also repairs the invisible table
-  borders pandoc imports produce.
-- **watch** — live mode: remote edits auto-pull, local saves auto-push, and if
-  both sides changed the remote version lands in `<name>.conflict.md` instead
-  of clobbering your work.
-- **Comment actions from Markdown** — under a pulled comment, write
-  `{>>reply: thanks, fixed<<}` or `{>>resolve<<}` and the next `push` posts the
-  reply / resolves the thread in the doc. `{>>comment: needs a source<<}`
-  anywhere creates a new doc-level comment quoting your line.
-- **Images** — local images are embedded on create/push; on pull, doc images
-  download to `<name>-assets/` next to your file.
-- **status / diff** — every linked file at a glance (`--remote` flags drift,
-  `--json` for scripts); `diff` shows remote vs local before you overwrite
-  either.
-- **share / export** — share with specific people (`--with
-  alice@example.com:edit`) or flip link sharing; export to pdf/docx/odt/epub.
-- **doctor** — one command that tells a new user exactly what's missing
-  (pandoc, OAuth client, token, API reachability).
-- **link / unlink / open / auth / config** — bind an existing doc to a file,
-  one-time OAuth, inspect effective settings.
-- **rainbow** — 🌈 make the first paragraph of any doc rainbow-colored. No
-  further justification will be offered.
+annotations anchored to the quoted text, and you can reply to or resolve them
+from your editor. It also applies real styling (font and a color theme) on
+every push, so the doc you share doesn't look like a raw import.
 
 ## Install
 
+Linux and macOS are both supported (CI runs both).
+
 ```bash
-pipx install gdoc-sync        # or: uvx gdoc-sync --help
+# pipx or uv, any platform
+pipx install git+https://github.com/MattHandzel/gdoc-sync
+# or
+uvx --from git+https://github.com/MattHandzel/gdoc-sync gdoc-sync --help
+
 # Nix
 nix run github:MattHandzel/gdoc-sync -- --help
 ```
 
-Requires [pandoc](https://pandoc.org/installing.html) on your PATH (the Nix
-package bundles it).
+You also need [pandoc](https://pandoc.org/installing.html) on your PATH (the
+Nix package bundles it):
 
-## Setup (one time)
+```bash
+brew install pandoc        # macOS
+sudo apt install pandoc    # Debian/Ubuntu
+```
 
-Google requires you to bring your own (free) OAuth client — ~5 minutes:
-**[docs/oauth-setup.md](docs/oauth-setup.md)**. Then:
+Then do the one-time OAuth setup (~5 minutes, Google makes everyone bring
+their own client): **[docs/oauth-setup.md](docs/oauth-setup.md)**, then
 
 ```bash
 gdoc-sync auth --client ~/Downloads/client_secret_*.json
+gdoc-sync doctor           # confirms everything is wired up
 ```
 
-## Usage
+## Commands
 
-```bash
-# New doc from markdown; URL lands on your clipboard, shared for commenting
-gdoc-sync create meeting-notes.md
-gdoc-sync create post.md --title "Draft v2" --edit --open
-gdoc-sync create spec.md --private --font "EB Garamond" --theme catppuccin-mocha
+- **create** turns Markdown into a new Google Doc via pandoc, so headings,
+  lists, tables, images, code blocks, and links survive. The title comes from
+  your first `# H1`, YAML `title:`, or the filename. The URL is printed and
+  copied to your clipboard, and the doc is shared anyone-with-link-can-comment
+  by default (`--edit`, `--view`, `--private`, `--share-with alice@x.com:edit`
+  to change it).
+- **push** replaces the linked doc's content in place. The doc id, URL, and
+  sharing are untouched. If someone edited the doc since your last pull, you
+  get warned before overwriting (`--yes` for scripts). Reply, resolve, and
+  comment markers in the file are applied to the doc's comment threads (see
+  below).
+- **pull** brings the doc back as clean Markdown, including multi-tab
+  documents, with every unresolved comment embedded as `{>>Author: text<<}`
+  right after the text it anchors to. Images download to `<name>-assets/`.
+  Your local YAML frontmatter is preserved. `--json` for scripts.
+- **watch** is live sync: remote edits pull automatically, local saves push
+  automatically, and if both sides changed in the same tick the remote version
+  is written to `<name>.conflict.md` so nothing gets clobbered.
+- **status** and **diff** tell you what's linked and what drifted before you
+  overwrite either side.
+- **share** and **export** change sharing on an existing doc and export it as
+  pdf, docx, odt, txt, html, or epub.
+- **doctor** checks pandoc, config, the OAuth client, the token, and the API,
+  and tells a new user exactly what's missing.
+- **link / unlink / open / auth / config** do what they say.
+- **rainbow** makes the first paragraph of any doc rainbow-colored. No further
+  justification will be offered.
 
-# Round-trip
-gdoc-sync push post.md                  # local → doc
-gdoc-sync pull post.md                  # doc (+ comments) → local
-gdoc-sync pull 'https://docs.google.com/document/d/<id>/edit' notes.md   # pull & link
+## Comments
 
-# Link a doc that already exists
-gdoc-sync link post.md 'https://docs.google.com/document/d/<id>/edit'
-
-# What's linked, and did anything drift?
-gdoc-sync status --remote
-gdoc-sync diff post.md
-
-# Live sync while collaborators edit
-gdoc-sync watch post.md              # or: --all, --interval 10, --no-push
-
-# Sharing and export
-gdoc-sync create spec.md --share-with alice@example.com:edit
-gdoc-sync share spec.md --with bob@example.com --anyone view
-gdoc-sync export spec.md --format pdf
-
-# Something not working?
-gdoc-sync doctor
-```
-
-Comments arrive like this:
+Pulled comments arrive anchored in your prose:
 
 ```markdown
-The proposal hinges on the Q3 numbers{>>Maya Chen: source for these? | Matt: added below<<}.
+The proposal hinges on the Q3 numbers{>>Maya Chen: source for these?<<}.
 ```
 
-Reply or resolve without leaving your editor — put a marker right after the
-pulled comment and `push`:
+Answer them without leaving your editor. Put a marker right after the pulled
+comment and push:
 
 ```markdown
-...Q3 numbers{>>Maya Chen: source for these?<<}{>>reply: added in the appendix<<}.
-...intro paragraph{>>Sam: too long<<}{>>resolve: trimmed<<}.
-And a brand-new note for the doc:{>>comment: should we cite the 2025 survey?<<}
+...the Q3 numbers{>>Maya Chen: source for these?<<}{>>reply: added in the appendix<<}.
+...the intro paragraph{>>Sam: too long<<}{>>resolve: trimmed<<}.
+A brand-new note for the doc:{>>comment: should we cite the 2025 survey?<<}
 ```
 
-All `{>>...<<}` markers are stripped automatically on push (they live in the
-doc's comment threads, not in your prose).
+On push, the reply lands on Maya's thread, Sam's thread gets resolved, and the
+new comment appears on the doc quoting your line. All `{>>...<<}` markers are
+stripped from the pushed content itself.
 
 ## Configuration
 
-`~/.config/gdoc-sync/config.yaml` (override with `--config` or
-`$GDOC_SYNC_CONFIG`):
+Settings live at `~/.config/gdoc-sync/config.yaml` (override with `--config`
+or `$GDOC_SYNC_CONFIG`). Everything has a default, so the file is optional.
 
 ```yaml
 defaults:
   font: Garamond            # any font name from the Google Docs font picker
-  theme: catppuccin-latte   # catppuccin-{latte,frappe,macchiato,mocha} | none
+  theme: professional       # see the theme list below, or "none"
   share: comment            # private | view | comment | edit
   clipboard: true
 
-# Optional: keep sync state (file↔doc mappings) somewhere synced/versioned.
-# Default: ~/.local/state/gdoc-sync/state.yaml
+# Your own themes. heading_color takes one color for every heading level;
+# use headings: for a per-level list or map instead.
+themes:
+  acme:
+    background: "#ffffff"
+    text: "#1f2933"
+    link: "#0b57d0"
+    pageless: false
+    heading_color: "#7c2d12"
+
+# Optional: keep sync state (the file-to-doc mappings) somewhere synced or
+# versioned. Default: ~/.local/state/gdoc-sync/state.yaml
 # state_file: ~/notes/.gdoc-sync-state.yaml
 ```
 
-`gdoc-sync config` prints the effective settings and where they came from.
+Built-in themes:
+
+| Theme | Look |
+|---|---|
+| `professional` (default) | Paginated, near-black text, navy heading ramp. Reads like a normal work doc. |
+| `minimal` | Black on white, no accent colors, pageless. |
+| `catppuccin-latte` | Light [Catppuccin](https://catppuccin.com), rainbow headings by level. |
+| `catppuccin-frappe` / `catppuccin-macchiato` / `catppuccin-mocha` | The dark Catppuccin flavors. |
+
+`gdoc-sync config` prints your effective settings and every available theme,
+including your custom ones. Per-invocation overrides: `--font` and `--theme`
+on create and push.
+
+## macOS notes
+
+Everything works the same on macOS: the clipboard uses `pbcopy`, watch-mode
+notifications use `osascript`, and config lives at `~/.config/gdoc-sync/`.
+Install pandoc with `brew install pandoc`. CI runs the test suite on macOS on
+every commit.
 
 ## Limitations (honest ones)
 
-- **New anchored comments can't be created via the API.** Google's Drive API
-  saves but ignores comment anchors on Google Docs
-  ([issue 292610078](https://issuetracker.google.com/issues/292610078)) — no
+- **New anchored comments can't be created through the API.** Google's Drive
+  API saves but ignores comment anchors on Google Docs
+  ([issue 292610078](https://issuetracker.google.com/issues/292610078)), so no
   third-party tool can highlight-comment a text range. That's why
-  `{>>comment: ...<<}` becomes a *doc-level* comment quoting your text, while
-  replies and resolves (which the API does support) attach to the real thread.
-- Push replaces the whole doc body (suggested-edits history in the doc doesn't
-  survive a push; comments do).
-- Pull is high-level Markdown: footnotes and deeply nested formatting are not
-  round-trip-faithful yet, and `diff` compares that lossy representation.
-- `watch` polls (default 30s); Drive's real push notifications need a public
-  webhook, which a CLI doesn't have.
+  `{>>comment: ...<<}` becomes a doc-level comment quoting your text, while
+  replies and resolves (which the API supports) attach to the real thread.
+- Push replaces the whole doc body. Comments survive it; suggested-edit
+  history doesn't.
+- Pull produces straightforward Markdown. Footnotes and deeply nested
+  formatting aren't round-trip-faithful yet, and `diff` compares that lossy
+  representation.
+- `watch` polls (default every 30s). Google's real push notifications need a
+  public webhook, which a CLI doesn't have.
 
 ## Roadmap
 
-- Custom user themes in config; theme gallery
-- Service-account auth for CI; GitHub Action recipe
+- Publish to PyPI
+- Service-account auth for CI, plus a GitHub Action recipe
 - Folder/batch sync with `.gdocsyncignore`
 - Library API (`import gdoc_sync`)
 
@@ -179,5 +184,8 @@ nix develop        # or: pip install -e ".[dev]"
 pytest -q
 ruff check src tests
 ```
+
+The demo GIF is rendered with [vhs](https://github.com/charmbracelet/vhs)
+against the real API: `demo/render.sh`.
 
 MIT © Matthew Handzel

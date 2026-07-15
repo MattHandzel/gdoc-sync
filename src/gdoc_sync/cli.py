@@ -249,12 +249,12 @@ def _print_config() -> None:
         get_theme,
         state_path,
     )
-    from .style import THEMES
+    from .style import available_themes
     cp = config_path()
     print(f"Config file: {cp}" + ("" if cp.exists() else "  (not created yet — defaults in effect)"))
     print(f"State file:  {state_path()}")
     print(f"  font:      {get_font()}")
-    print(f"  theme:     {get_theme() or 'none'}  (available: {', '.join(THEMES)}, none)")
+    print(f"  theme:     {get_theme() or 'none'}  (available: {', '.join(available_themes())}, none)")
     print(f"  share:     {get_share_default()}")
     print(f"  clipboard: {get_clipboard_default()}")
 

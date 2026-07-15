@@ -4,9 +4,12 @@
 Used by both `create` and `push` so a doc looks the same regardless of how its
 content got in:
   - one font family across the whole body (default Garamond)
-  - a color theme (default Catppuccin Latte): page background, body text color,
-    accent-colored headings (blue, honoring the "blue headers" look), and links
+  - a color theme (default: professional): page background, body text color,
+    accent-colored headings, and links
   - bold preserved (setting the font resets weight, which clears bold)
+
+Themes are the built-ins below plus any user-defined themes from the config's
+``themes:`` section (see resolve_theme / _normalize_theme).
 """
 
 from __future__ import annotations
@@ -16,6 +19,10 @@ from .services import NUM_RETRIES
 # ---------------------------------------------------------------------------
 # Color themes
 # ---------------------------------------------------------------------------
+
+_HEADING_KEYS = ["HEADING_1", "HEADING_2", "HEADING_3",
+                 "HEADING_4", "HEADING_5", "HEADING_6"]
+
 
 # Catppuccin palettes (https://catppuccin.com). Latte = light, others = dark.
 #
@@ -30,7 +37,34 @@ def _rainbow(red, peach, yellow, green, blue, mauve):
     }
 
 
+def _ramp(title, subtitle, h1, h2, h3, rest):
+    return {
+        "TITLE": title, "SUBTITLE": subtitle,
+        "HEADING_1": h1, "HEADING_2": h2, "HEADING_3": h3,
+        "HEADING_4": rest, "HEADING_5": rest, "HEADING_6": rest,
+    }
+
+
 THEMES: dict[str, dict] = {
+    # The default: what a shared business/work doc is expected to look like.
+    # Paginated, near-black body text, navy heading ramp, standard link blue.
+    "professional": {
+        "background": "#ffffff",
+        "text": "#202124",
+        "link": "#0b57d0",
+        "pageless": False,
+        "headings": _ramp("#1f3864", "#595959",
+                          "#1f3864", "#2f5496", "#4472c4", "#44546a"),
+    },
+    # Black on white, no accent color anywhere. For people who want styling
+    # limited to the font.
+    "minimal": {
+        "background": "#ffffff",
+        "text": "#000000",
+        "link": "#0b57d0",
+        "pageless": True,
+        "headings": {k: "#000000" for k in _HEADING_KEYS + ["TITLE", "SUBTITLE"]},
+    },
     "catppuccin-latte": {
         "background": "#ffffff",  # white page (kept white by request)
         "text": "#4c4f69",        # body text
@@ -60,6 +94,52 @@ THEMES: dict[str, dict] = {
         "headings": _rainbow("#ed8796", "#f5a97f", "#eed49f", "#a6da95", "#8aadf4", "#c6a0f6"),
     },
 }
+
+
+def _normalize_theme(raw: dict) -> dict:
+    """Turn a user-defined config theme into a full palette.
+
+    Headings accept three shapes:
+      heading_color: "#1f3864"                       — one color for all levels
+      headings: ["#a", "#b", ...]                     — H1..H6 by position
+      headings: {HEADING_1: "#a", TITLE: "#b", ...}   — explicit map
+    """
+    palette = {
+        "background": raw.get("background", "#ffffff"),
+        "text": raw.get("text", "#202124"),
+        "link": raw.get("link", "#0b57d0"),
+        "pageless": bool(raw.get("pageless", False)),
+    }
+    headings = raw.get("headings", raw.get("heading_color", "#1f3864"))
+    if isinstance(headings, str):
+        headings = {k: headings for k in _HEADING_KEYS + ["TITLE", "SUBTITLE"]}
+    elif isinstance(headings, list):
+        colors = list(headings) or ["#1f3864"]
+        colors += [colors[-1]] * (6 - len(colors))
+        headings = dict(zip(_HEADING_KEYS, colors))
+        headings["TITLE"] = colors[0]
+        headings["SUBTITLE"] = colors[1] if len(colors) > 1 else colors[0]
+    else:
+        headings = {str(k).upper(): v for k, v in dict(headings).items()}
+    palette["headings"] = headings
+    return palette
+
+
+def available_themes() -> list[str]:
+    """Built-in theme names plus user-defined ones from the config."""
+    from .config import get_custom_themes
+    return list(THEMES) + [t for t in get_custom_themes() if t not in THEMES]
+
+
+def resolve_theme(name: str | None) -> dict | None:
+    """A palette for ``name``: user-defined config themes first, then built-ins."""
+    if not name:
+        return None
+    from .config import get_custom_themes
+    raw = get_custom_themes().get(name)
+    if isinstance(raw, dict):
+        return _normalize_theme(raw)
+    return THEMES.get(name)
 
 
 def _rgb(hexstr: str) -> dict:
@@ -126,7 +206,7 @@ def apply_styles(
     cap = doc_end - 1
     full_range = {"startIndex": 1, "endIndex": cap}
 
-    palette = THEMES.get(theme) if theme else None
+    palette = resolve_theme(theme)
     requests: list[dict] = []
 
     # 1. Font over the whole body (clears bold — restored below).

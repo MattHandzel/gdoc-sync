@@ -32,7 +32,7 @@ from pathlib import Path
 import yaml
 
 DEFAULT_FONT = "Garamond"
-DEFAULT_THEME = "catppuccin-latte"
+DEFAULT_THEME = "professional"
 DEFAULT_SHARE = "comment"  # private | view | comment | edit
 
 _config_override: Path | None = None
@@ -101,6 +101,12 @@ def get_share_default() -> str:
 
 def get_clipboard_default() -> bool:
     return bool(_setting("clipboard", True))
+
+
+def get_custom_themes() -> dict:
+    """User-defined themes from the config's ``themes:`` section."""
+    themes = load_config().get("themes")
+    return themes if isinstance(themes, dict) else {}
 
 
 # ---------------------------------------------------------------------------
