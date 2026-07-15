@@ -12,7 +12,7 @@
       packages = forAllSystems (pkgs: rec {
         gdoc-sync = pkgs.python3Packages.buildPythonApplication {
           pname = "gdoc-sync";
-          version = "0.2.0";
+          version = "0.4.0";
           pyproject = true;
           src = ./.;
 
