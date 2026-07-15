@@ -13,7 +13,7 @@ def status(*, remote: bool = False, json_out: bool = False) -> None:
     rows = []
     docs_service = None
     if remote and mappings:
-        from .services import get_services
+        from .services import NUM_RETRIES, get_services
         _, docs_service = get_services()
 
     for local, doc_id in sorted(mappings.items()):
@@ -28,7 +28,7 @@ def status(*, remote: bool = False, json_out: bool = False) -> None:
             try:
                 current = docs_service.documents().get(
                     documentId=doc_id, fields="revisionId"
-                ).execute().get("revisionId", "")
+                ).execute(num_retries=NUM_RETRIES).get("revisionId", "")
                 if not stored:
                     row["remote"] = "no-stored-revision"
                 elif current == stored:

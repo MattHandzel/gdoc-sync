@@ -40,10 +40,24 @@ look like a raw import.
   document-wide on every create/push: rainbow-by-level heading colors, themed
   links, page background, pageless layout. Also repairs the invisible table
   borders pandoc imports produce.
-- **status** — every linked file at a glance; `--remote` flags docs that
-  changed since your last sync; `--json` for scripts.
-- **link / auth / config** — bind an existing doc to a file, one-time OAuth,
-  inspect effective settings.
+- **watch** — live mode: remote edits auto-pull, local saves auto-push, and if
+  both sides changed the remote version lands in `<name>.conflict.md` instead
+  of clobbering your work.
+- **Comment actions from Markdown** — under a pulled comment, write
+  `{>>reply: thanks, fixed<<}` or `{>>resolve<<}` and the next `push` posts the
+  reply / resolves the thread in the doc. `{>>comment: needs a source<<}`
+  anywhere creates a new doc-level comment quoting your line.
+- **Images** — local images are embedded on create/push; on pull, doc images
+  download to `<name>-assets/` next to your file.
+- **status / diff** — every linked file at a glance (`--remote` flags drift,
+  `--json` for scripts); `diff` shows remote vs local before you overwrite
+  either.
+- **share / export** — share with specific people (`--with
+  alice@example.com:edit`) or flip link sharing; export to pdf/docx/odt/epub.
+- **doctor** — one command that tells a new user exactly what's missing
+  (pandoc, OAuth client, token, API reachability).
+- **link / unlink / open / auth / config** — bind an existing doc to a file,
+  one-time OAuth, inspect effective settings.
 - **rainbow** — 🌈 make the first paragraph of any doc rainbow-colored. No
   further justification will be offered.
 
@@ -85,6 +99,18 @@ gdoc-sync link post.md 'https://docs.google.com/document/d/<id>/edit'
 
 # What's linked, and did anything drift?
 gdoc-sync status --remote
+gdoc-sync diff post.md
+
+# Live sync while collaborators edit
+gdoc-sync watch post.md              # or: --all, --interval 10, --no-push
+
+# Sharing and export
+gdoc-sync create spec.md --share-with alice@example.com:edit
+gdoc-sync share spec.md --with bob@example.com --anyone view
+gdoc-sync export spec.md --format pdf
+
+# Something not working?
+gdoc-sync doctor
 ```
 
 Comments arrive like this:
@@ -93,8 +119,17 @@ Comments arrive like this:
 The proposal hinges on the Q3 numbers{>>Maya Chen: source for these? | Matt: added below<<}.
 ```
 
-They're stripped automatically on the next `push` (they live in the doc, not
-in your prose).
+Reply or resolve without leaving your editor — put a marker right after the
+pulled comment and `push`:
+
+```markdown
+...Q3 numbers{>>Maya Chen: source for these?<<}{>>reply: added in the appendix<<}.
+...intro paragraph{>>Sam: too long<<}{>>resolve: trimmed<<}.
+And a brand-new note for the doc:{>>comment: should we cite the 2025 survey?<<}
+```
+
+All `{>>...<<}` markers are stripped automatically on push (they live in the
+doc's comment threads, not in your prose).
 
 ## Configuration
 
@@ -120,22 +155,22 @@ defaults:
 - **New anchored comments can't be created via the API.** Google's Drive API
   saves but ignores comment anchors on Google Docs
   ([issue 292610078](https://issuetracker.google.com/issues/292610078)) — no
-  third-party tool can highlight-comment a text range. Pulled comments are
-  anchored by quoted text; pushing comment *replies/resolves* from Markdown is
-  on the roadmap (that direction the API does support).
+  third-party tool can highlight-comment a text range. That's why
+  `{>>comment: ...<<}` becomes a *doc-level* comment quoting your text, while
+  replies and resolves (which the API does support) attach to the real thread.
 - Push replaces the whole doc body (suggested-edits history in the doc doesn't
   survive a push; comments do).
-- Pull is high-level Markdown: images, footnotes, and deeply nested formatting
-  are not round-trip-faithful yet.
+- Pull is high-level Markdown: footnotes and deeply nested formatting are not
+  round-trip-faithful yet, and `diff` compares that lossy representation.
+- `watch` polls (default 30s); Drive's real push notifications need a public
+  webhook, which a CLI doesn't have.
 
 ## Roadmap
 
-- `watch` — live mode: auto-pull on remote change, auto-push on save, conflict
-  files instead of clobbering
-- Reply to / resolve comments from Markdown markers
-- Images on create/push and download-on-pull
-- Share with specific emails; service-account auth for CI
-- Custom user themes in config
+- Custom user themes in config; theme gallery
+- Service-account auth for CI; GitHub Action recipe
+- Folder/batch sync with `.gdocsyncignore`
+- Library API (`import gdoc_sync`)
 
 ## Development
 

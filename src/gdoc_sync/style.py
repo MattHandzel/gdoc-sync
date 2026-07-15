@@ -11,6 +11,8 @@ content got in:
 
 from __future__ import annotations
 
+from .services import NUM_RETRIES
+
 # ---------------------------------------------------------------------------
 # Color themes
 # ---------------------------------------------------------------------------
@@ -112,7 +114,7 @@ def apply_styles(
 
     Returns True if a request was sent, False if there was nothing to style.
     """
-    doc = docs_service.documents().get(documentId=doc_id).execute()
+    doc = docs_service.documents().get(documentId=doc_id).execute(num_retries=NUM_RETRIES)
     body_content = doc.get("body", {}).get("content", [])
     if not body_content:
         return False
@@ -224,7 +226,7 @@ def apply_styles(
 
     docs_service.documents().batchUpdate(
         documentId=doc_id, body={"requests": requests}
-    ).execute()
+    ).execute(num_retries=NUM_RETRIES)
     return True
 
 
@@ -253,7 +255,7 @@ def apply_table_borders(docs_service, doc_id: str, width_pt: float = 1.0) -> int
     borders, so the grid is invisible. We set all four borders on every cell
     explicitly via the Docs API. Returns the number of tables styled.
     """
-    doc = docs_service.documents().get(documentId=doc_id).execute()
+    doc = docs_service.documents().get(documentId=doc_id).execute(num_retries=NUM_RETRIES)
     body = doc.get("body", {}).get("content", [])
     border = _solid_border(width_pt)
 
@@ -294,5 +296,5 @@ def apply_table_borders(docs_service, doc_id: str, width_pt: float = 1.0) -> int
     if requests:
         docs_service.documents().batchUpdate(
             documentId=doc_id, body={"requests": requests}
-        ).execute()
+        ).execute(num_retries=NUM_RETRIES)
     return tables

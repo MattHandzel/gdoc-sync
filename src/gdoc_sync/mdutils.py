@@ -54,19 +54,28 @@ def copy_to_clipboard(text: str) -> tuple[bool, str]:
     return False, ""
 
 
-def pandoc_to_docx(markdown_body: str, output_path: Path) -> None:
-    """Convert markdown to docx via pandoc. Raises with a helpful message on failure."""
+def pandoc_to_docx(markdown_body: str, output_path: Path,
+                   resource_dir: Path | None = None) -> None:
+    """Convert markdown to docx via pandoc. Raises with a helpful message on failure.
+
+    ``resource_dir`` (usually the markdown file's directory) lets pandoc
+    resolve relative image paths so local images get embedded in the docx.
+    """
+    cmd = [
+        "pandoc",
+        "-f", "gfm+yaml_metadata_block",
+        "-t", "docx",
+        "-o", str(output_path),
+    ]
+    if resource_dir is not None:
+        cmd += ["--resource-path", str(resource_dir)]
     try:
         proc = subprocess.run(
-            [
-                "pandoc",
-                "-f", "gfm+yaml_metadata_block",
-                "-t", "docx",
-                "-o", str(output_path),
-            ],
+            cmd,
             input=markdown_body,
             text=True,
             capture_output=True,
+            cwd=str(resource_dir) if resource_dir else None,
         )
     except FileNotFoundError:
         raise RuntimeError(

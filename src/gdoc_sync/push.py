@@ -14,11 +14,11 @@ from pathlib import Path
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
-from .comments import strip_comments
+from .comments import apply_comment_actions, strip_comments
 from .config import get_doc_id, get_font, get_revision, get_theme, set_revision
 from .create import DOCX_MIME
 from .mdutils import pandoc_to_docx, strip_frontmatter
-from .services import get_services
+from .services import NUM_RETRIES, get_services
 from .style import apply_styles, apply_table_borders
 
 
@@ -34,7 +34,7 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
     drive_service, docs_service = get_services()
 
     # Optimistic locking: warn when the remote changed since our last pull/push.
-    doc = docs_service.documents().get(documentId=doc_id).execute()
+    doc = docs_service.documents().get(documentId=doc_id).execute(num_retries=NUM_RETRIES)
     current_rev = doc.get("revisionId", "")
     stored_rev = get_revision(str(local_path))
 
@@ -54,6 +54,12 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
                 sys.exit(1)
 
     markdown = local_path.read_text()
+
+    # {>>reply: ...<<} / {>>resolve<<} / {>>comment: ...<<} markers sync back
+    # to the doc's comment threads before being stripped from the content.
+    for line in apply_comment_actions(drive_service, doc_id, markdown):
+        print(f"  {line}")
+
     body_md = strip_comments(strip_frontmatter(markdown))
 
     title = doc.get("title", "Untitled")
@@ -62,9 +68,9 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
     print("Converting markdown → docx via pandoc...")
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = Path(tmpdir) / "doc.docx"
-        pandoc_to_docx(body_md, docx_path)
+        pandoc_to_docx(body_md, docx_path, resource_dir=local_path.parent)
         media = MediaFileUpload(str(docx_path), mimetype=DOCX_MIME, resumable=False)
-        drive_service.files().update(fileId=doc_id, media_body=media).execute()
+        drive_service.files().update(fileId=doc_id, media_body=media).execute(num_retries=NUM_RETRIES)
 
     try:
         n = apply_table_borders(docs_service, doc_id)
@@ -85,6 +91,6 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
 
     new_rev = docs_service.documents().get(
         documentId=doc_id, fields="revisionId"
-    ).execute().get("revisionId", current_rev)
+    ).execute(num_retries=NUM_RETRIES).get("revisionId", current_rev)
     set_revision(str(local_path), new_rev)
     print("  Pushed successfully.")

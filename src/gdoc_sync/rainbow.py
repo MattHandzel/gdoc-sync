@@ -16,6 +16,7 @@ import sys
 from googleapiclient.discovery import build
 
 from .auth import get_credentials
+from .services import NUM_RETRIES
 
 RAINBOW = [
     (0.898, 0.224, 0.208),  # red
@@ -141,7 +142,7 @@ def main(argv: list[str] | None = None):
     creds = get_credentials()
     docs = build("docs", "v1", credentials=creds)
 
-    doc = docs.documents().get(documentId=doc_id, includeTabsContent=True).execute()
+    doc = docs.documents().get(documentId=doc_id, includeTabsContent=True).execute(num_retries=NUM_RETRIES)
 
     tabs = doc.get("tabs") or []
     tab_id = None
@@ -174,7 +175,7 @@ def main(argv: list[str] | None = None):
         print("--dry-run: not applying.")
         return
 
-    docs.documents().batchUpdate(documentId=doc_id, body={"requests": reqs}).execute()
+    docs.documents().batchUpdate(documentId=doc_id, body={"requests": reqs}).execute(num_retries=NUM_RETRIES)
     print("Applied.")
 
 

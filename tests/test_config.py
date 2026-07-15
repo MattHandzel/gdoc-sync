@@ -123,3 +123,37 @@ def test_mapping_roundtrip_and_revisions(tmp_path):
 ])
 def test_extract_doc_id(url, expected):
     assert config.extract_doc_id_from_url(url) == expected
+
+
+def test_remove_mapping(tmp_path, monkeypatch):
+    import gdoc_sync.config as config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("defaults: {font: Arial}\n")
+    monkeypatch.setenv("GDOC_SYNC_CONFIG", str(cfg))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    config.set_config_override(None)
+
+    f = tmp_path / "note.md"
+    f.write_text("hi")
+    config.set_doc_id(str(f), "doc123", "rev1")
+    assert config.get_doc_id(str(f)) == "doc123"
+
+    assert config.remove_mapping(str(f)) is True
+    assert config.get_doc_id(str(f)) is None
+    assert config.get_revision(str(f)) is None
+    assert config.remove_mapping(str(f)) is False
+
+
+def test_parse_share_with():
+    import pytest
+
+    from gdoc_sync.create import parse_share_with
+
+    assert parse_share_with("a@b.com") == ("a@b.com", "commenter")
+    assert parse_share_with("a@b.com:edit") == ("a@b.com", "writer")
+    assert parse_share_with("a@b.com:view") == ("a@b.com", "reader")
+    with pytest.raises(ValueError):
+        parse_share_with("nonsense")
+    with pytest.raises(ValueError):
+        parse_share_with("a@b.com:owner")

@@ -165,6 +165,17 @@ def set_revision(local_path: str | os.PathLike, revision_id: str) -> None:
     save_state(state)
 
 
+def remove_mapping(local_path: str | os.PathLike) -> bool:
+    """Unlink a local file from its doc. Returns True if a mapping was removed."""
+    state = load_state()
+    resolved = str(Path(local_path).resolve())
+    removed = state.get("mappings", {}).pop(resolved, None) is not None
+    state.get("revisions", {}).pop(resolved, None)
+    if removed:
+        save_state(state)
+    return removed
+
+
 def all_mappings() -> dict[str, str]:
     """All local-file → doc-id mappings."""
     return dict(load_state().get("mappings", {}))

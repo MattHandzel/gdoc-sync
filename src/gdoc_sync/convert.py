@@ -24,10 +24,16 @@ class OffsetMapping:
         return None
 
 
-def doc_to_markdown(doc: dict) -> tuple[str, OffsetMapping]:
-    """Convert Google Docs API document JSON to markdown string + offset map."""
+def doc_to_markdown(doc: dict, image_saver=None) -> tuple[str, OffsetMapping]:
+    """Convert Google Docs API document JSON to markdown string + offset map.
+
+    ``image_saver(object_id, content_uri) -> str | None`` downloads an inline
+    image and returns the (relative) path to reference in the markdown; when
+    None (default), inline images are skipped.
+    """
     body = doc.get("body", {}).get("content", [])
     lists_meta = doc.get("lists", {})
+    inline_objects = doc.get("inlineObjects", {})
     md_parts: list[str] = []
     offset_map = OffsetMapping()
     md_pos = 0
@@ -39,25 +45,32 @@ def doc_to_markdown(doc: dict) -> tuple[str, OffsetMapping]:
             gdoc_end = element.get("endIndex", gdoc_start)
 
             prefix = _paragraph_prefix(para, lists_meta)
-            text, runs_md = _convert_paragraph_elements(para.get("elements", []))
+            text, runs_md = _convert_paragraph_elements(
+                para.get("elements", []), inline_objects, image_saver)
 
             line = prefix + runs_md
             # Strip trailing newline from Google (we add our own)
             if line.endswith("\n"):
                 line = line[:-1]
-            line += "\n"
 
-            # Blank line before headings
-            style_type = para.get("paragraphStyle", {}).get("namedStyleType", "")
-            if style_type.startswith("HEADING") and md_parts and md_parts[-1] != "\n":
+            # Block elements are separated by blank lines — real markdown
+            # paragraphs. Without this, a pull → push round trip merges every
+            # adjacent line into one paragraph (and breaks tables/images that
+            # follow text). List items stay tight (single newline).
+            is_list_item = para.get("bullet") is not None
+            if not is_list_item and md_parts and not md_parts[-1].endswith("\n\n"):
                 md_parts.append("\n")
                 md_pos += 1
+            line += "\n" if is_list_item else "\n\n"
 
             offset_map.add(gdoc_start, gdoc_end, md_pos, md_pos + len(line))
             md_parts.append(line)
             md_pos += len(line)
 
         elif "table" in element:
+            if md_parts and not md_parts[-1].endswith("\n\n"):
+                md_parts.append("\n")
+                md_pos += 1
             table_md = _convert_table(element["table"])
             md_parts.append(table_md)
             md_pos += len(table_md)
@@ -109,7 +122,11 @@ def _paragraph_prefix(para: dict, lists_meta: dict) -> str:
     return ""
 
 
-def _convert_paragraph_elements(elements: list[dict]) -> tuple[str, str]:
+def _convert_paragraph_elements(
+    elements: list[dict],
+    inline_objects: dict | None = None,
+    image_saver=None,
+) -> tuple[str, str]:
     """Convert paragraph elements to (plain_text, markdown_text)."""
     plain_parts = []
     md_parts = []
@@ -117,7 +134,19 @@ def _convert_paragraph_elements(elements: list[dict]) -> tuple[str, str]:
     for elem in elements:
         text_run = elem.get("textRun")
         if not text_run:
-            # Could be inlineObjectElement, etc. — skip
+            obj_id = elem.get("inlineObjectElement", {}).get("inlineObjectId")
+            if obj_id and image_saver and inline_objects:
+                uri = (
+                    inline_objects.get(obj_id, {})
+                    .get("inlineObjectProperties", {})
+                    .get("embeddedObject", {})
+                    .get("imageProperties", {})
+                    .get("contentUri")
+                )
+                if uri:
+                    saved = image_saver(obj_id, uri)
+                    if saved:
+                        md_parts.append(f"![image]({saved})")
             continue
 
         content = text_run.get("content", "")

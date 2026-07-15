@@ -71,3 +71,63 @@ def test_table_renders_as_pipe_table():
     assert "| h1 | h2 |" in md
     assert "|---|---|" in md
     assert "| a | b |" in md
+
+
+def test_inline_image_uses_saver():
+    doc = {
+        "body": {"content": [{
+            "startIndex": 1, "endIndex": 10,
+            "paragraph": {"elements": [
+                {"textRun": {"content": "before "}},
+                {"inlineObjectElement": {"inlineObjectId": "kix.img1"}},
+                {"textRun": {"content": " after\n"}},
+            ]},
+        }]},
+        "inlineObjects": {"kix.img1": {"inlineObjectProperties": {"embeddedObject": {
+            "imageProperties": {"contentUri": "https://example.com/i.png"}}}}},
+    }
+    from gdoc_sync.convert import doc_to_markdown
+
+    seen = {}
+
+    def saver(object_id, uri):
+        seen[object_id] = uri
+        return "doc-assets/img-001.png"
+
+    md, _ = doc_to_markdown(doc, image_saver=saver)
+    assert "![image](doc-assets/img-001.png)" in md
+    assert seen == {"kix.img1": "https://example.com/i.png"}
+
+    # without a saver, images are skipped (legacy behavior)
+    md_plain, _ = doc_to_markdown(doc)
+    assert "![image]" not in md_plain
+
+
+def test_blocks_separated_by_blank_lines():
+    """pull → push must not merge adjacent paragraphs (gfm soft-wrap) or
+    swallow a table that follows text."""
+    from gdoc_sync.convert import doc_to_markdown
+
+    def para(text, bullet=False):
+        p = {"elements": [{"textRun": {"content": text + "\n"}}]}
+        if bullet:
+            p["bullet"] = {"nestingLevel": 0, "listId": "l1"}
+        return {"paragraph": p}
+
+    doc = {"body": {"content": [
+        para("First paragraph."),
+        para("Second paragraph."),
+        para("item one", bullet=True),
+        para("item two", bullet=True),
+        para("After the list."),
+        {"table": {"tableRows": [
+            {"tableCells": [{"content": [para("a")]}, {"content": [para("b")]}]},
+            {"tableCells": [{"content": [para("1")]}, {"content": [para("2")]}]},
+        ]}},
+    ]}, "lists": {}}
+
+    md, _ = doc_to_markdown(doc)
+    assert "First paragraph.\n\nSecond paragraph." in md
+    assert "- item one\n- item two" in md          # list stays tight
+    assert "item two\n\nAfter the list." in md     # blank line closes the list
+    assert "After the list.\n\n| a | b |" in md    # table needs its blank line

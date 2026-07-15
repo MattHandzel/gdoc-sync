@@ -22,12 +22,25 @@ from googleapiclient.http import MediaFileUpload
 from .comments import strip_comments
 from .config import get_clipboard_default, get_font, get_theme, set_doc_id
 from .mdutils import copy_to_clipboard, derive_title, pandoc_to_docx, strip_frontmatter
-from .services import get_services
+from .services import NUM_RETRIES, get_services
 from .style import apply_styles, apply_table_borders
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 SHARE_ROLES = {"edit": "writer", "comment": "commenter", "view": "reader"}
+
+
+def parse_share_with(entry: str) -> tuple[str, str]:
+    """Parse an ``email[:view|comment|edit]`` spec into (email, Drive role)."""
+    email, _, role_word = entry.partition(":")
+    email = email.strip()
+    role_word = (role_word.strip().lower() or "comment")
+    if "@" not in email:
+        raise ValueError(f"not an email address: {email!r}")
+    role = SHARE_ROLES.get(role_word)
+    if not role:
+        raise ValueError(f"role must be view|comment|edit, got {role_word!r}")
+    return email, role
 
 
 def create_doc(
@@ -37,6 +50,7 @@ def create_doc(
     font: str | None = None,
     theme: str | None = None,
     share_mode: str = "comment",  # private | view | comment | edit
+    share_with: list[str] | None = None,  # "email[:view|comment|edit]"
     copy: bool | None = None,
     save_mapping: bool = True,
     open_in_browser: bool = False,
@@ -60,7 +74,7 @@ def create_doc(
     print("Converting markdown → docx via pandoc...")
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = Path(tmpdir) / "doc.docx"
-        pandoc_to_docx(body_md, docx_path)
+        pandoc_to_docx(body_md, docx_path, resource_dir=local_path.parent)
 
         print(f"Creating Google Doc: {title}")
         media = MediaFileUpload(str(docx_path), mimetype=DOCX_MIME, resumable=False)
@@ -68,7 +82,7 @@ def create_doc(
             body={"name": title, "mimeType": "application/vnd.google-apps.document"},
             media_body=media,
             fields="id,webViewLink,name",
-        ).execute()
+        ).execute(num_retries=NUM_RETRIES)
 
     doc_id = created["id"]
     url = created.get("webViewLink") or f"https://docs.google.com/document/d/{doc_id}/edit"
@@ -94,12 +108,24 @@ def create_doc(
                 fileId=doc_id,
                 body={"type": "anyone", "role": role},
                 fields="id",
-            ).execute()
+            ).execute(num_retries=NUM_RETRIES)
             print(f"  Shared: anyone with link can {role}")
         except HttpError as e:
             print(f"  Warning: could not set sharing permission: {e}")
     else:
         print("  Kept private")
+
+    for entry in share_with or []:
+        try:
+            email, role = parse_share_with(entry)
+            drive_service.permissions().create(
+                fileId=doc_id,
+                body={"type": "user", "role": role, "emailAddress": email},
+                fields="id",
+            ).execute(num_retries=NUM_RETRIES)
+            print(f"  Shared with {email} ({role})")
+        except (ValueError, HttpError) as e:
+            print(f"  Warning: could not share with {entry}: {e}")
 
     if save_mapping:
         try:

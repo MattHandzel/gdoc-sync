@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gdoc-sync"
-version = "0.2.0"
+version = "0.4.0"
 description = "Sync Markdown files with Google Docs — create, push, pull, comment round-trip, and opinionated styling from the CLI"
 readme = "README.md"
 license = { text = "MIT" }

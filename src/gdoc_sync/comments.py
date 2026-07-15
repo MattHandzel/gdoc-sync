@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import re
+
 from .convert import OffsetMapping
+from .services import NUM_RETRIES
 
 
 def fetch_comments(drive_service, file_id: str) -> list[dict]:
@@ -17,7 +20,7 @@ def fetch_comments(drive_service, file_id: str) -> list[dict]:
             fields="comments(id,content,author/displayName,quotedFileContent/value,anchor,resolved,replies(content,author/displayName)),nextPageToken",
             includeDeleted=False,
             pageToken=page_token,
-        ).execute()
+        ).execute(num_retries=NUM_RETRIES)
 
         for comment in response.get("comments", []):
             if not comment.get("resolved", False):
@@ -137,3 +140,137 @@ def _fuzzy_find(markdown: str, quoted: str) -> int | None:
         orig_pos += 1
 
     return orig_pos
+
+
+# ---------------------------------------------------------------------------
+# Comment actions written in markdown (reply / resolve / new comment)
+# ---------------------------------------------------------------------------
+#
+# The Drive API cannot create text-anchored comments on Google Docs (the
+# anchor is accepted but silently ignored), so the markdown → doc direction
+# only offers what actually works:
+#
+#   {>>reply: thanks, fixed<<}     after a pulled comment → posts a reply
+#   {>>resolve<<}                  after a pulled comment → resolves it
+#   {>>resolve: done in r2<<}      resolve with a closing reply
+#   {>>comment: needs a source<<}  anywhere → new unanchored doc-level
+#                                  comment quoting the preceding line
+
+_SPAN_RE = re.compile(r"\{>>(.*?)<<\}", re.DOTALL)
+_ACTION_RE = re.compile(
+    r"^\s*(reply|resolve|comment)\s*(?::\s*(.*))?\s*$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def parse_comment_actions(markdown: str) -> list[dict]:
+    """Extract action markers, each bound to the nearest preceding pulled comment.
+
+    Returns dicts: {type, text, target (inner text of the pulled comment the
+    action applies to, or None), context (preceding line, for new comments)}.
+    """
+    actions = []
+    last_pulled: str | None = None
+
+    for m in _SPAN_RE.finditer(markdown):
+        inner = m.group(1)
+        am = _ACTION_RE.match(inner)
+        if not am:
+            last_pulled = inner.strip()
+            continue
+
+        kind = am.group(1).lower()
+        text = (am.group(2) or "").strip()
+        context = ""
+        if kind == "comment":
+            before = _SPAN_RE.sub("", markdown[: m.start()]).rstrip()
+            context = before.rsplit("\n", 1)[-1].strip()[-120:]
+        actions.append({
+            "type": kind,
+            "text": text,
+            "target": last_pulled if kind in ("reply", "resolve") else None,
+            "context": context,
+        })
+
+    return actions
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def match_comment(target_inner: str, remote_comments: list[dict]) -> dict | None:
+    """Find the remote comment whose pulled CriticMarkup form matches ``target_inner``.
+
+    Prefix matching in both directions tolerates replies added remotely after
+    the pull (remote grows) or reply markers the user already wrote (local grows).
+    """
+    want = _norm(target_inner)
+    for comment in remote_comments:
+        author = comment.get("author", {}).get("displayName", "Unknown")
+        formatted = _format_comment(author, comment.get("content", ""),
+                                    comment.get("replies", []))
+        have = _norm(formatted[3:-3])  # strip {>> <<}
+        if want == have or want.startswith(have) or have.startswith(want):
+            return comment
+    return None
+
+
+def apply_comment_actions(drive_service, doc_id: str, markdown: str) -> list[str]:
+    """Execute reply/resolve/comment markers found in ``markdown`` against the doc.
+
+    Returns human-readable result lines; API failures become warnings rather
+    than aborting the caller's push.
+    """
+    from googleapiclient.errors import HttpError
+
+    actions = parse_comment_actions(markdown)
+    if not actions:
+        return []
+
+    remote = fetch_comments(drive_service, doc_id)
+    results = []
+
+    for action in actions:
+        try:
+            if action["type"] in ("reply", "resolve"):
+                if not action["target"]:
+                    results.append(
+                        f"Warning: {{>>{action['type']}<<}} has no preceding "
+                        "pulled comment to act on — skipped")
+                    continue
+                target = match_comment(action["target"], remote)
+                if not target:
+                    results.append(
+                        f"Warning: could not match '{action['target'][:60]}' to an "
+                        "unresolved doc comment — skipped")
+                    continue
+                body: dict = {}
+                if action["type"] == "resolve":
+                    body["action"] = "resolve"
+                if action["text"]:
+                    body["content"] = action["text"]
+                elif action["type"] == "reply":
+                    results.append("Warning: empty {>>reply:<<} — skipped")
+                    continue
+                drive_service.replies().create(
+                    fileId=doc_id, commentId=target["id"], body=body, fields="id",
+                ).execute(num_retries=NUM_RETRIES)
+                verb = "Resolved" if action["type"] == "resolve" else "Replied to"
+                results.append(f"{verb}: {action['target'][:60]}")
+
+            elif action["type"] == "comment":
+                if not action["text"]:
+                    results.append("Warning: empty {>>comment:<<} — skipped")
+                    continue
+                content = action["text"]
+                if action["context"]:
+                    content = f"Re: “{action['context']}”\n\n{content}"
+                drive_service.comments().create(
+                    fileId=doc_id, body={"content": content}, fields="id",
+                ).execute(num_retries=NUM_RETRIES)
+                results.append(f"New doc-level comment: {action['text'][:60]}")
+        except HttpError as e:
+            results.append(f"Warning: comment action failed ({action['type']}): {e}")
+
+    return results
