@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 
-from .auth import client_secret_path, token_path
+from .auth import CREATE_CLIENT_URL, client_secret_path, consent_screen_url, project_id, token_path
 from .config import all_mappings, config_path, load_config, state_path
 
 OK, BAD, SKIP = "✓", "✗", "–"
@@ -77,9 +77,15 @@ def doctor(online: bool = True) -> int:
         rows.append(("state", BAD, f"{state_path()}: {e}"))
 
     cs = client_secret_path()
-    rows.append(("oauth client", OK if cs.exists() else SKIP,
-                 str(cs) if cs.exists()
-                 else f"none at {cs} — see docs/oauth-setup.md"))
+    if cs.exists():
+        pid = project_id(cs)
+        detail = f"{cs} (project: {pid})" if pid else str(cs)
+        rows.append(("oauth client", OK, detail))
+        rows.append(("consent screen", SKIP,
+                     f"if tokens die weekly, publish to Production: {consent_screen_url(cs)}"))
+    else:
+        rows.append(("oauth client", SKIP,
+                     f"none at {cs} — create one at {CREATE_CLIENT_URL}"))
     rows.append(("token", *_check_token()))
 
     token_usable = rows[-1][1] == OK

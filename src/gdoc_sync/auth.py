@@ -27,6 +27,10 @@ SCOPES = [
 ]
 
 OAUTH_DOC_URL = "https://github.com/MattHandzel/gdoc-sync/blob/main/docs/oauth-setup.md"
+CREATE_CLIENT_URL = "https://console.cloud.google.com/apis/credentials/oauthclient"
+CONSENT_URL = "https://console.cloud.google.com/apis/credentials/consent"
+ENABLE_DOCS_URL = "https://console.cloud.google.com/apis/library/docs.googleapis.com"
+ENABLE_DRIVE_URL = "https://console.cloud.google.com/apis/library/drive.googleapis.com"
 
 
 def token_path() -> Path:
@@ -38,6 +42,27 @@ def client_secret_path() -> Path:
     if env:
         return Path(env).expanduser()
     return config_dir() / "client_secret.json"
+
+
+def project_id(cs_path: Path | None = None) -> str | None:
+    """The Google Cloud project the OAuth client belongs to (not a secret)."""
+    import json
+
+    path = cs_path or client_secret_path()
+    try:
+        data = json.loads(path.read_text())
+        for key in ("installed", "web"):
+            if key in data:
+                return data[key].get("project_id")
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def consent_screen_url(cs_path: Path | None = None) -> str:
+    """Direct link to the consent screen, preselecting the project when known."""
+    pid = project_id(cs_path)
+    return f"{CONSENT_URL}?project={pid}" if pid else CONSENT_URL
 
 
 def install_client_secret(source: Path) -> Path:
@@ -70,13 +95,23 @@ def get_credentials() -> Credentials:
             # after ~7 days) — fall through to a fresh browser consent instead
             # of crashing.
             print("Stored token could not be refreshed; re-running OAuth flow...")
+            print(
+                "If this happens every week, your OAuth app is in Testing mode\n"
+                "(refresh tokens expire after 7 days). Publish it to Production:\n"
+                f"  {consent_screen_url()}"
+            )
 
     cs = client_secret_path()
     if not cs.exists():
         raise FileNotFoundError(
             f"OAuth client secret not found at {cs}.\n"
-            f"Create one (Google Cloud Console → OAuth client ID, Desktop app) and run:\n"
-            f"  gdoc-sync auth --client <downloaded-client-secret.json>\n"
+            f"Create one (takes ~2 minutes):\n"
+            f"  1. Create an OAuth client (type: Desktop app) and download its JSON:\n"
+            f"     {CREATE_CLIENT_URL}\n"
+            f"  2. Enable the two APIs for that project:\n"
+            f"     {ENABLE_DOCS_URL}\n"
+            f"     {ENABLE_DRIVE_URL}\n"
+            f"  3. Install it:  gdoc-sync auth --client <downloaded.json>\n"
             f"Full walkthrough: {OAUTH_DOC_URL}"
         )
 
@@ -99,3 +134,10 @@ def run_auth(client: str | None = None, force: bool = False) -> None:
         print("Removed cached token; re-running OAuth flow.")
     get_credentials()
     print(f"Authenticated. Token cached at {token_path()}")
+    pid = project_id()
+    if pid:
+        print(
+            f"OAuth client project: {pid}\n"
+            f"If the app is in Testing mode this token dies in 7 days; publish it\n"
+            f"to Production once to make it permanent: {consent_screen_url()}"
+        )

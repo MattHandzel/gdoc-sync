@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.1 (2026-07-17)
+
+Maximally helpful error messages.
+
+- Every auth failure now prints the exact Cloud Console link to fix it, not
+  just a description of what to do: the missing-client-secret error links the
+  create-a-client page and both enable-API pages; a failed token refresh links
+  the consent screen with your project preselected and explains the
+  Testing-mode 7 day expiry.
+- `gdoc-sync auth` prints the OAuth client's project id and the
+  publish-to-Production link after authenticating.
+- `gdoc-sync doctor` shows which project the client belongs to and the same
+  consent screen link.
+
 ## 0.5.0 (2026-07-15)
 
 Themes and polish.
