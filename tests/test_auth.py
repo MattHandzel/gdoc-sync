@@ -28,3 +28,12 @@ def test_consent_url_preselects_project(tmp_path):
 
 def test_consent_url_without_project(tmp_path):
     assert auth.consent_screen_url(tmp_path / "nope.json") == auth.CONSENT_URL
+
+
+def test_non_interactive_never_opens_browser(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth, "token_path", lambda: tmp_path / "token.json")
+    monkeypatch.setattr(auth, "client_secret_path", lambda: _write_secret(tmp_path))
+    import pytest
+
+    with pytest.raises(RuntimeError, match="gdoc-sync auth"):
+        auth.get_credentials(interactive=False)

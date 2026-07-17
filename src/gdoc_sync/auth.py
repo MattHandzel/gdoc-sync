@@ -74,8 +74,12 @@ def install_client_secret(source: Path) -> Path:
     return dest
 
 
-def get_credentials() -> Credentials:
-    """Return valid credentials, refreshing or running the OAuth flow as needed."""
+def get_credentials(interactive: bool = True) -> Credentials:
+    """Return valid credentials, refreshing or running the OAuth flow as needed.
+
+    With ``interactive=False``, never open a browser: raise RuntimeError where
+    the consent flow would have started (for doctor and other diagnostics).
+    """
     creds = None
     tp = token_path()
 
@@ -94,6 +98,12 @@ def get_credentials() -> Credentials:
             # Dead refresh token (e.g. OAuth app in "Testing" mode expires them
             # after ~7 days) — fall through to a fresh browser consent instead
             # of crashing.
+            if not interactive:
+                raise RuntimeError(
+                    "stored token is dead (refresh failed) — run: gdoc-sync auth --force\n"
+                    "If this happens every week, publish the OAuth app to Production:\n"
+                    f"  {consent_screen_url()}"
+                ) from None
             print("Stored token could not be refreshed; re-running OAuth flow...")
             print(
                 "If this happens every week, your OAuth app is in Testing mode\n"
@@ -114,6 +124,9 @@ def get_credentials() -> Credentials:
             f"  3. Install it:  gdoc-sync auth --client <downloaded.json>\n"
             f"Full walkthrough: {OAUTH_DOC_URL}"
         )
+
+    if not interactive:
+        raise RuntimeError("no usable token — run: gdoc-sync auth")
 
     flow = InstalledAppFlow.from_client_secrets_file(str(cs), SCOPES)
     creds = flow.run_local_server(port=0)

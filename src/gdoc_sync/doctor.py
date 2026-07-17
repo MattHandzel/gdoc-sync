@@ -45,7 +45,7 @@ def _check_token() -> tuple[str, str]:
 def _check_api() -> tuple[str, str]:
     try:
         from .services import NUM_RETRIES, get_services
-        drive, _ = get_services()
+        drive, _ = get_services(interactive=False)
         about = drive.about().get(fields="user").execute(num_retries=NUM_RETRIES)
         email = about.get("user", {}).get("emailAddress", "?")
         return OK, f"authenticated to Google as {email}"

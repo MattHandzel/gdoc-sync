@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2 (2026-07-17)
+
+- `doctor` never opens a browser: a dead token now reports as a failure with
+  the fix command and consent screen link instead of silently launching the
+  interactive OAuth flow mid-diagnosis.
+
 ## 0.5.1 (2026-07-17)
 
 Maximally helpful error messages.

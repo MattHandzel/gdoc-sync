@@ -11,9 +11,9 @@ from .auth import get_credentials
 NUM_RETRIES = 4
 
 
-def get_services():
+def get_services(interactive: bool = True):
     """Return (drive, docs) service clients sharing one credential."""
-    creds = get_credentials()
+    creds = get_credentials(interactive=interactive)
     drive = build("drive", "v3", credentials=creds)
     docs = build("docs", "v1", credentials=creds)
     return drive, docs
