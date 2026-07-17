@@ -26,6 +26,9 @@ annotations anchored to the quoted text, and you can reply to or resolve them
 from your editor. It also applies real styling (font and a color theme) on
 every push, so the doc you share doesn't look like a raw import.
 
+Editing in Neovim? [gdoc-sync.nvim](https://github.com/MattHandzel/gdoc-sync.nvim)
+puts all of this behind `:Gdoc` in the buffer you're writing.
+
 ## Install
 
 Linux and macOS are both supported (CI runs both).
