@@ -76,9 +76,12 @@ gdoc-sync doctor           # confirms everything is wired up
   documents, with every unresolved comment embedded as `{>>Author: text<<}`
   right after the text it anchors to. Images download to `<name>-assets/`.
   Your local YAML frontmatter is preserved. `--json` for scripts.
-- **watch** is live sync: remote edits pull automatically, local saves push
-  automatically, and if both sides changed in the same tick the remote version
-  is written to `<name>.conflict.md` so nothing gets clobbered.
+- **sync** reconciles a file with its doc once: a real three-way merge, so
+  edits made on both sides both survive (see [Two-way sync](#two-way-sync)).
+- **watch** is that same reconcile on a timer — live two-way sync. `--json`
+  emits one event per line for editor integrations.
+- **resolve** clears a conflict once you have sorted the file out; **restore**
+  brings back any of the automatic backups.
 - **status** and **diff** tell you what's linked and what drifted before you
   overwrite either side.
 - **share** and **export** change sharing on an existing doc and export it as
@@ -110,6 +113,55 @@ On push, the reply lands on Maya's thread, Sam's thread gets resolved, and the
 new comment appears on the doc quoting your line. All `{>>...<<}` markers are
 stripped from the pushed content itself.
 
+## Two-way sync
+
+`gdoc-sync sync` (once) and `gdoc-sync watch` (on a timer) reconcile a file and
+its doc without either side winning by default.
+
+**Why it needs a memory.** `md → pandoc → docx → Google Doc → md` is not the
+identity function: the markdown that comes back out of a doc is never
+byte-identical to what went in. So "the file differs from the doc" tells you
+nothing about whether anyone edited anything. Instead, each successful sync
+stores two snapshots — the local file's bytes, and what the doc rendered to at
+that moment — and each side is compared against **its own** snapshot. Round-trip
+noise can't masquerade as an edit, and a doc sitting open in a browser tab
+(which rewrites its `revisionId` constantly) doesn't look like a stream of
+remote changes.
+
+**What happens when both sides moved.** The doc's changes are replayed onto
+your file with a three-way merge, exactly as git would:
+
+```
+$ gdoc-sync sync notes.md
+notes.md: merged remote and local changes, pushed
+  backup: ~/.local/state/gdoc-sync/backups/notes-3f2a….20260726-141230.pre-merge.md
+```
+
+Edits in different parts of the document all survive. Only genuinely
+overlapping edits conflict, and a conflict:
+
+- writes git-style markers into the file (or, with `conflict_style: sidecar`,
+  leaves your file alone and drops the doc's version in `<name>.remote.md`);
+- is **sticky** — recorded in the state file, surviving restarts, and
+  suspending automatic sync for that file so nothing overwrites the
+  un-merged side while you think;
+- clears itself when you remove the markers, or on `gdoc-sync resolve <file>`.
+
+**Nothing is written without a way back.** Every write to a tracked file is
+preceded by a timestamped backup and performed atomically:
+
+```
+gdoc-sync restore notes.md              # list the backups
+gdoc-sync restore notes.md --index 0    # bring the newest one back
+```
+
+**When it refuses to act.** With no stored snapshot and two sides that already
+differ, there is no safe merge base and the engine will not guess — run
+`gdoc-sync diff`, then `sync --adopt-local` (push yours) or `--adopt-remote`
+(take the doc's). It also refuses to push an emptied file over a doc that has
+content (`--force` overrides), and abandons a merge if the file changes
+underneath it mid-sync.
+
 ## Configuration
 
 Settings live at `~/.config/gdoc-sync/config.yaml` (override with `--config`
@@ -121,6 +173,14 @@ defaults:
   theme: professional       # see the theme list below, or "none"
   share: comment            # private | view | comment | edit
   clipboard: true
+  conflict_style: markers   # markers (git-style, in the file) | sidecar
+  watch_interval: 15        # seconds between polls for `watch`
+
+# Only needed if the auto-detected clipboard tool is wrong for your setup.
+# gdoc-sync already picks wl-copy / xclip / xsel / pbcopy / clip.exe (WSL) /
+# termux-clipboard-set by platform, and falls back to an OSC 52 escape so a
+# copy still reaches you over plain SSH.
+# clipboard_command: "xsel --clipboard --input"
 
 # Your own themes. heading_color takes one color for every heading level;
 # use headings: for a per-level list or map instead.
@@ -167,11 +227,16 @@ every commit.
   replies and resolves (which the API supports) attach to the real thread.
 - Push replaces the whole doc body. Comments survive it; suggested-edit
   history doesn't.
-- Pull produces straightforward Markdown. Footnotes and deeply nested
-  formatting aren't round-trip-faithful yet, and `diff` compares that lossy
-  representation.
-- `watch` polls (default every 30s). Google's real push notifications need a
-  public webhook, which a CLI doesn't have.
+- Pull produces straightforward Markdown. Deeply nested formatting isn't
+  round-trip-faithful yet, and `diff` compares that lossy representation. The
+  sync engine is built around this fact rather than pretending otherwise — see
+  [Two-way sync](#two-way-sync) — so lossiness costs you fidelity, not content.
+- `watch` polls (default every 15s). Google's real push notifications need a
+  public webhook, which a CLI doesn't have. Edits made in Google Docs therefore
+  take up to one interval to arrive.
+- A merge is line-based, like git's. Two people rewriting the *same paragraph*
+  in different ways is a conflict you resolve by hand, not something the tool
+  can settle for you.
 
 ## Roadmap
 
@@ -187,6 +252,20 @@ nix develop        # or: pip install -e ".[dev]"
 pytest -q
 ruff check src tests
 ```
+
+The offline suite covers the sync engine's full decision table against fakes —
+including the three-way merge through both `git merge-file` and the pure-Python
+fallback. Two-way sync also has a real-API end-to-end test, because the failure
+mode it guards against only appears against the genuine round trip and Google's
+`revisionId` churn:
+
+```bash
+python3 tests/e2e/two_way_sync.py
+```
+
+It uses an isolated config/state pair (your real mappings are untouched),
+creates one private doc, edits it from both sides, checks that both edits
+survive, exercises the conflict path, and trashes the doc on the way out.
 
 The demo GIF is rendered with [vhs](https://github.com/charmbracelet/vhs)
 against the real API: `demo/render.sh`.

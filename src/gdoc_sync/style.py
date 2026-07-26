@@ -178,6 +178,7 @@ def apply_styles(
     *,
     font: str | None = None,
     theme: str | None = None,
+    baked: bool = False,
 ) -> bool:
     """Apply font + color theme over the whole document in one atomic batch.
 
@@ -192,12 +193,23 @@ def apply_styles(
 
     `theme` is a key in THEMES, or None/unknown to skip theming (font only).
 
+    ``baked`` says the font and heading/body colors already arrived in the
+    document's *named styles* via a themed reference.docx (see :mod:`.refdoc`).
+    That is the better outcome — the document genuinely is that color, so a
+    heading typed later in Google Docs comes out right, and footnotes (which
+    live outside ``body.content`` and so are unreachable from here) are covered.
+    Only what a docx cannot express is left to do: page background, pageless
+    layout, and link color.
+
     Returns True if a request was sent, False if there was nothing to style.
     """
     doc = docs_service.documents().get(documentId=doc_id).execute(num_retries=NUM_RETRIES)
     body_content = doc.get("body", {}).get("content", [])
     if not body_content:
         return False
+
+    if baked:
+        font = None  # already in the named styles; re-applying would clear bold
 
     doc_end = body_content[-1].get("endIndex", 1)
     # Body starts at index 1; the trailing newline at doc_end-1 can't be styled.
@@ -220,7 +232,7 @@ def apply_styles(
         })
 
     # 2. Body text color over the whole body (headings/links re-colored below).
-    if palette:
+    if palette and not baked:
         requests.append({
             "updateTextStyle": {
                 "range": full_range,
@@ -263,7 +275,7 @@ def apply_styles(
 
     # 4. Color headings — rainbow by level (red highest).
     if palette:
-        for s, e, named in heading_ranges:
+        for s, e, named in (() if baked else heading_ranges):
             s, e = _clamp(s, e)
             if e > s:
                 requests.append({
@@ -285,14 +297,47 @@ def apply_styles(
                         "fields": "foregroundColor",
                     }
                 })
-        # 6. Page background.
+    # 6. Footnotes. These live in their own segments, not in body.content, so
+    #    the walk above never reaches them and they keep the imported default
+    #    font — the reason footnote text used to come out in the wrong face.
+    #    Ranges into a footnote must name its segmentId.
+    if not baked:
+        for footnote_id, footnote in (doc.get("footnotes") or {}).items():
+            for _named, run in _walk_runs(footnote.get("content", [])):
+                s, e = run.get("startIndex"), run.get("endIndex")
+                if s is None or e is None or e <= s:
+                    continue
+                text_style: dict = {}
+                fields = []
+                if font:
+                    text_style["weightedFontFamily"] = {"fontFamily": font}
+                    fields.append("weightedFontFamily")
+                    if run["textRun"].get("textStyle", {}).get("bold"):
+                        text_style["bold"] = True
+                        fields.append("bold")
+                if palette:
+                    text_style["foregroundColor"] = _optional_color(palette["text"])
+                    fields.append("foregroundColor")
+                if not fields:
+                    continue
+                requests.append({
+                    "updateTextStyle": {
+                        "range": {"segmentId": footnote_id,
+                                  "startIndex": s, "endIndex": e},
+                        "textStyle": text_style,
+                        "fields": ",".join(fields),
+                    }
+                })
+
+    if palette:
+        # 7. Page background.
         requests.append({
             "updateDocumentStyle": {
                 "documentStyle": {"background": {"color": _optional_color(palette["background"])}},
                 "fields": "background",
             }
         })
-        # 7. Pageless layout.
+        # 8. Pageless layout.
         if palette.get("pageless"):
             requests.append({
                 "updateDocumentStyle": {

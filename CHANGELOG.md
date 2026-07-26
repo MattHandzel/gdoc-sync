@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.6.0 (2026-07-26)
+
+### Two-way sync no longer loses edits
+
+`watch` in 0.5.x could destroy work. Editing the same document in Google Docs
+and in markdown, then touching either side again, could wipe one of them. Three
+separate faults combined to cause it:
+
+- **Change detection was guesswork.** A local mtime and the doc's `revisionId`
+  stood in for "did this change?". Google rewrites `revisionId` on autosave and
+  presence changes, so a doc merely *open* in a browser tab looked like an
+  endless stream of remote edits — each one overwriting the local file with a
+  lossy re-render of the doc.
+- **Conflicts were forgotten instantly.** On detecting that both sides had
+  changed, `watch` wrote a `.conflict.md` copy and then advanced *both*
+  baselines — erasing the divergence from its own memory, so the next
+  one-sided change overwrote the side that had never been merged.
+- **There was nothing to merge against.** No ancestor was stored, so the only
+  available moves were "overwrite local" or "overwrite remote".
+
+The sync engine has been rebuilt around a real three-way merge:
+
+- Every linked file now keeps **two snapshots** — the local file's bytes, and
+  what the doc rendered to — as of the last successful sync. Each side is
+  compared against its own snapshot, so the lossy `md → doc → md` round trip
+  can no longer masquerade as an edit.
+- Divergence is **merged**, not settled by fiat: edits in different parts of a
+  document all survive. Only genuinely overlapping edits conflict.
+- A conflict is **sticky**. It is recorded in the state file, survives a
+  restart, and suspends automatic sync for that file until you resolve it.
+- **Every write is backed up** (timestamped, in the state directory) and
+  atomic; `gdoc-sync restore` brings any of them back.
+- Guards refuse to push an emptied file over a doc with content, and abandon a
+  merge whose file changed underneath it mid-sync.
+- With no ancestor and a real divergence the engine **refuses to guess**,
+  asking for `--adopt-local` or `--adopt-remote`.
+
+New commands: `sync` (one safe reconcile), `resolve`, `restore`.
+`watch --json` emits one event per line, so an editor knows exactly when a file
+changed on disk and when a conflict was raised.
+
+### Styling is now innate to the document
+
+Headings imported as blue whatever the theme. pandoc's reference docx
+hard-codes Word's accent blue into the heading *style definitions*, which
+Google Docs imports as the document's named styles; recolouring runs through
+the API painted over that without changing it, so the heading dropdown, the
+outline, and every heading typed later in Google Docs stayed blue.
+
+The theme is now baked into a generated reference docx, so the document's named
+styles genuinely carry it. This also fixes **footnotes rendering in the default
+font** — footnote text lives outside `body.content` and was unreachable from
+the API restyling pass entirely. Code keeps its monospace face.
+
+### Also
+
+- Clipboard copy is platform-aware: Wayland, X11, macOS, `clip.exe` under WSL,
+  Termux, and an OSC 52 escape so copying still works over plain SSH. A
+  `clipboard_command:` setting overrides the detection.
+- The state file is written atomically, and a corrupt one is moved aside rather
+  than silently discarding every mapping.
+- Sync baselines and backups always live in the XDG state directory, never
+  beside a state file that happens to sit inside a synced notes vault.
+- New settings: `conflict_style` (`markers`/`sidecar`), `watch_interval`,
+  `clipboard_command`.
+- Default watch interval is 15s (was 30s).
+
+## 0.5.3 (2026-07-26)
+
+- `watch` no longer sends desktop notifications. It is normally spawned by
+  gdoc-sync.nvim for the file being edited, so a pull/push fired on nearly
+  every tick — one notification per tick for an operation the user had just
+  performed themselves. All events still print to stdout, which is where the
+  editor surfaces them, so no information is lost.
+
 ## 0.5.2 (2026-07-17)
 
 - `doctor` never opens a browser: a dead token now reports as a failure with

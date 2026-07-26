@@ -63,14 +63,44 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", dest="json_out",
                    help="emit machine-readable JSON on stdout (progress goes to stderr)")
 
-    p = sub.add_parser("watch", help="live sync: auto-pull remote edits, auto-push local ones")
+    p = sub.add_parser("watch", help="live sync: merge remote and local edits continuously")
     p.add_argument("files", nargs="*", type=_existing_file,
                    help="linked files to watch (default with --all: every mapping)")
     p.add_argument("--all", action="store_true", help="watch every linked file")
-    p.add_argument("--interval", type=int, default=30, metavar="SEC",
-                   help="poll interval in seconds (default 30)")
+    p.add_argument("--interval", type=int, default=None, metavar="SEC",
+                   help="poll interval in seconds (default: config watch_interval, else 15)")
     p.add_argument("--no-push", action="store_true",
                    help="pull remote changes only; never auto-push local edits")
+    p.add_argument("--force", action="store_true",
+                   help="bypass the guard that refuses to push an emptied file")
+    p.add_argument("--json", action="store_true", dest="json_lines",
+                   help="emit one JSON object per event (for editor integrations)")
+
+    p = sub.add_parser("sync", help="reconcile a file with its doc once (safe two-way merge)")
+    p.add_argument("files", nargs="*", type=_existing_file,
+                   help="linked files to sync (default with --all: every mapping)")
+    p.add_argument("--all", action="store_true", help="sync every linked file")
+    p.add_argument("--no-push", action="store_true",
+                   help="merge remote changes in, but never push local edits")
+    p.add_argument("--force", action="store_true",
+                   help="bypass the guard that refuses to push an emptied file")
+    adopt = p.add_mutually_exclusive_group()
+    adopt.add_argument("--adopt-local", action="store_true",
+                       help="resolve by pushing the local file over the doc")
+    adopt.add_argument("--adopt-remote", action="store_true",
+                       help="resolve by overwriting the local file with the doc")
+    p.add_argument("--json", action="store_true", dest="json_lines",
+                   help="emit one JSON object per file")
+
+    p = sub.add_parser("resolve", help="mark a conflicted file as resolved and resume syncing")
+    p.add_argument("files", nargs="*", type=_existing_file,
+                   help="conflicted files (default: list them)")
+    p.add_argument("--all", action="store_true", help="resolve every conflicted file")
+
+    p = sub.add_parser("restore", help="restore a synced file from its automatic backups")
+    p.add_argument("file", type=_existing_file)
+    p.add_argument("--index", type=int, default=None, metavar="N",
+                   help="restore the Nth backup (0 = newest); omit to list them")
 
     p = sub.add_parser("share", help="change sharing on a linked doc")
     p.add_argument("target", help="a linked local file, or a doc URL/ID")
@@ -176,16 +206,24 @@ def _dispatch(args: argparse.Namespace) -> None:
             _api_guard(lambda: pull(doc_id, output, json_out=args.json_out))
 
     elif args.command == "watch":
-        from .config import all_mappings
+        from .config import get_watch_interval
         from .watch import watch
-        if args.all:
-            files = [Path(f) for f in all_mappings() if Path(f).exists()]
-        else:
-            files = list(args.files)
-        if not files:
-            print("Nothing to watch — pass files or --all.", file=sys.stderr)
-            sys.exit(1)
-        _api_guard(lambda: watch(files, interval=args.interval, no_push=args.no_push))
+        files = _sync_targets(args, "watch")
+        interval = args.interval if args.interval is not None else get_watch_interval()
+        _api_guard(lambda: watch(files, interval=interval, no_push=args.no_push,
+                                 force=args.force, json_lines=args.json_lines))
+
+    elif args.command == "sync":
+        files = _sync_targets(args, "sync")
+        adopt = "local" if args.adopt_local else "remote" if args.adopt_remote else None
+        _api_guard(lambda: _run_sync(files, adopt=adopt, no_push=args.no_push,
+                                     force=args.force, json_lines=args.json_lines))
+
+    elif args.command == "resolve":
+        _cmd_resolve(args)
+
+    elif args.command == "restore":
+        _cmd_restore(args)
 
     elif args.command == "share":
         from .extras import resolve_doc_id
@@ -240,23 +278,161 @@ def _dispatch(args: argparse.Namespace) -> None:
         rainbow_main(args.args)
 
 
+def _sync_targets(args, verb: str) -> list[Path]:
+    """The files a sync/watch command should operate on."""
+    from .config import all_mappings
+    if args.all:
+        files = [Path(f) for f in all_mappings() if Path(f).exists()]
+    else:
+        files = list(args.files)
+    if not files:
+        print(f"Nothing to {verb} — pass files or --all.", file=sys.stderr)
+        sys.exit(1)
+    return files
+
+
+def _run_sync(files, *, adopt, no_push, force, json_lines) -> None:
+    """One reconcile pass over ``files``; exits non-zero if any conflicted."""
+    import json as _json
+
+    from .config import get_doc_id, set_revision
+    from .pull import render_doc
+    from .push import push as push_file
+    from .sync import reconcile
+
+    conflicts = 0
+    for path in files:
+        doc_id = get_doc_id(str(path))
+        if not doc_id:
+            print(f"Skipping {path}: not linked to a Google Doc", file=sys.stderr)
+            continue
+
+        outcome = reconcile(
+            path, doc_id,
+            render=lambda p, _d=doc_id: render_doc(_d, asset_path=p),
+            push=lambda p: push_file(p, yes=True, merged=True),
+            allow_push=not no_push,
+            adopt=adopt,
+            force=force,
+            say=(lambda *a: None) if json_lines else print,
+        )
+        if outcome.revision:
+            set_revision(str(path), outcome.revision)
+        if outcome.conflicted:
+            conflicts += 1
+
+        if json_lines:
+            print(_json.dumps({
+                "event": outcome.action, "file": str(path), "detail": outcome.detail,
+                "reload": outcome.wrote_local, "pushed": outcome.pushed,
+                "conflict": outcome.conflicted, "backup": outcome.backup,
+            }))
+        else:
+            print(f"{path.name}: {outcome.detail}")
+            if outcome.backup:
+                print(f"  backup: {outcome.backup}")
+
+    if conflicts:
+        sys.exit(2)
+
+
+def _cmd_resolve(args) -> None:
+    from .merge import has_conflict_markers
+    from .syncstate import all_conflicts, clear_conflict
+
+    conflicts = all_conflicts()
+    if args.all:
+        targets = [Path(p) for p in conflicts]
+    elif args.files:
+        targets = list(args.files)
+    else:
+        if not conflicts:
+            print("No conflicted files.")
+            return
+        print("Conflicted files:")
+        for p, c in conflicts.items():
+            print(f"  {p}\n    since {c.since}: {c.detail}")
+        print("\nResolve the file, then: gdoc-sync resolve <file>")
+        return
+
+    if not targets:
+        print("No conflicted files.")
+        return
+
+    for path in targets:
+        # Clearing the flag while markers are still in the text would push the
+        # markers straight into the doc.
+        try:
+            if has_conflict_markers(path.read_text(encoding="utf-8")):
+                print(f"{path.name}: still contains merge markers — "
+                      f"remove them first.", file=sys.stderr)
+                sys.exit(1)
+        except OSError:
+            pass
+        if clear_conflict(path):
+            print(f"{path.name}: resolved — syncing resumes.")
+        else:
+            print(f"{path.name}: was not marked conflicted.")
+
+
+def _cmd_restore(args) -> None:
+    from .config import atomic_write
+    from .syncstate import backup_file, list_backups
+
+    backups = list_backups(args.file)
+    if not backups:
+        print(f"No backups recorded for {args.file.name}.")
+        return
+
+    if args.index is None:
+        print(f"Backups for {args.file.name} (newest first):")
+        for i, b in enumerate(backups):
+            size = b.stat().st_size
+            print(f"  [{i}] {b.name}  ({size} bytes)")
+        print(f"\nRestore with: gdoc-sync restore {args.file} --index 0")
+        return
+
+    if not 0 <= args.index < len(backups):
+        print(f"No backup at index {args.index} (have 0..{len(backups) - 1}).",
+              file=sys.stderr)
+        sys.exit(1)
+
+    chosen = backups[args.index]
+    # Restoring is itself an overwrite, so the current contents get a backup too.
+    backup_file(args.file, tag="pre-restore")
+    atomic_write(args.file, chosen.read_text(encoding="utf-8"))
+    print(f"Restored {args.file.name} from {chosen.name}.")
+    print("The doc is untouched — run `gdoc-sync sync` when you're happy with it.")
+
+
 def _print_config() -> None:
     from .config import (
         config_path,
         get_clipboard_default,
+        get_conflict_style,
         get_font,
         get_share_default,
         get_theme,
+        get_watch_interval,
         state_path,
     )
     from .style import available_themes
+    from .syncstate import all_conflicts, sync_dir
     cp = config_path()
     print(f"Config file: {cp}" + ("" if cp.exists() else "  (not created yet — defaults in effect)"))
     print(f"State file:  {state_path()}")
-    print(f"  font:      {get_font()}")
-    print(f"  theme:     {get_theme() or 'none'}  (available: {', '.join(available_themes())}, none)")
-    print(f"  share:     {get_share_default()}")
-    print(f"  clipboard: {get_clipboard_default()}")
+    print(f"Sync data:   {sync_dir()}  (baselines + backups)")
+    print(f"  font:           {get_font()}")
+    print(f"  theme:          {get_theme() or 'none'}  (available: {', '.join(available_themes())}, none)")
+    print(f"  share:          {get_share_default()}")
+    print(f"  clipboard:      {get_clipboard_default()}")
+    print(f"  conflict_style: {get_conflict_style()}")
+    print(f"  watch_interval: {get_watch_interval()}s")
+    conflicts = all_conflicts()
+    if conflicts:
+        print(f"\n  {len(conflicts)} unresolved conflict(s):")
+        for p in conflicts:
+            print(f"    {p}")
 
 
 def _api_guard(fn) -> None:

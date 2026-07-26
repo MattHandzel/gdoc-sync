@@ -1,54 +1,93 @@
-"""Live sync: watch linked files, auto-pull remote edits, auto-push local ones.
+"""Live two-way sync: poll linked files and reconcile each one safely.
 
-Drive's push-notification channel (files.watch) needs a public webhook, so
-this polls instead: the remote ``revisionId`` and the local mtime, every
-``interval`` seconds. Cheap — one metadata GET per file per tick.
+All of the decision-making lives in :mod:`.sync`; this module is the loop that
+supplies I/O to it. Drive's push-notification channel (files.watch) needs a
+public webhook, so changes are found by polling — a cheap ``revisionId`` fetch
+per file per tick, escalating to a full render only when something may have
+moved.
 
-Conflict policy: when BOTH sides changed within one tick, neither is
-clobbered — the remote version is written to ``<name>.conflict.md`` beside the
-file and both versions are left for the user to merge.
+Every tick calls :func:`gdoc_sync.sync.reconcile`, which merges rather than
+overwrites, backs up before every write, and latches a conflict until the user
+resolves it. Nothing here decides which side wins.
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
+import json
+import signal
 import sys
 import time
 from pathlib import Path
 
-from .config import get_doc_id, get_revision, remove_mapping
+from .config import get_doc_id, get_revision, set_revision
 from .services import NUM_RETRIES, get_services
+from .sync import BLOCKED, NOOP, SKIPPED, reconcile
+from .syncstate import get_conflict
+
+# Consecutive failures before a file's poll interval starts backing off, and
+# the ceiling on that backoff. Stops a broken token or a deleted doc from
+# hammering the API every tick for hours.
+_BACKOFF_AFTER = 3
+_BACKOFF_MAX = 16
+
+# Deliberately no desktop notifications. `watch` is normally spawned by
+# gdoc-sync.nvim for the file being edited, so a sync fires on nearly every
+# tick while writing — a notification per tick is pure noise for an operation
+# the user just performed. Every event is printed instead, which is where the
+# editor picks it up.
 
 
-def _notify(title: str, body: str) -> None:
-    """Best-effort desktop notification (notify-send on Linux, osascript on macOS)."""
-    if shutil.which("notify-send"):
-        cmd = ["notify-send", title, body]
-    elif shutil.which("osascript"):
-        cmd = ["osascript", "-e",
-               f'display notification "{body}" with title "{title}"']
+class _Stopped(Exception):
+    """Raised in the main loop when a termination signal arrives."""
+
+
+def _peek_revision(docs_service, doc_id: str) -> str:
+    return (
+        docs_service.documents()
+        .get(documentId=doc_id, fields="revisionId")
+        .execute(num_retries=NUM_RETRIES)
+        .get("revisionId", "")
+    )
+
+
+def _emit(json_lines: bool, event: str, path: Path, detail: str, **extra) -> None:
+    """Report one event, either human-readable or as a JSON line.
+
+    The JSON form exists for gdoc-sync.nvim: it needs to know whether the file
+    on disk changed (reload the buffer) and whether a conflict was raised (show
+    it) — facts that are unreliable to scrape out of prose.
+    """
+    if json_lines:
+        payload = {"event": event, "file": str(path), "detail": detail}
+        payload.update(extra)
+        print(json.dumps(payload), flush=True)
     else:
-        return
-    try:
-        subprocess.run(cmd, timeout=5, capture_output=True)
-    except Exception:
-        pass
+        stamp = time.strftime("%H:%M:%S")
+        print(f"[{stamp}] {path.name}: {detail}", flush=True)
 
 
-def _mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except FileNotFoundError:
-        return 0.0
-
-
-def watch(paths: list[Path], interval: int = 30, no_push: bool = False) -> None:
+def watch(
+    paths: list[Path],
+    interval: int = 15,
+    no_push: bool = False,
+    *,
+    force: bool = False,
+    json_lines: bool = False,
+) -> None:
     """Watch files until interrupted. Ctrl-C to stop."""
-    from .pull import pull
-    from .push import push
+    from .pull import render_doc
+    from .push import push as push_file
 
     _, docs_service = get_services()
+
+    def render_for(path: Path):
+        return render_doc(get_doc_id(str(path)) or "", asset_path=path)
+
+    def push_for(path: Path) -> None:
+        # The engine only pushes content it has already merged, so the CLI's
+        # interactive overwrite prompt would be asking a question that has
+        # been answered — and there is no tty here to answer it.
+        push_file(path, yes=True, merged=True)
 
     tracked: dict[Path, dict] = {}
     for p in paths:
@@ -56,71 +95,110 @@ def watch(paths: list[Path], interval: int = 30, no_push: bool = False) -> None:
         if not doc_id:
             print(f"Skipping {p}: not linked to a Google Doc", file=sys.stderr, flush=True)
             continue
-        remote_rev = docs_service.documents().get(
-            documentId=doc_id, fields="revisionId"
-        ).execute(num_retries=NUM_RETRIES).get("revisionId", "")
-        stored = get_revision(str(p))
-        if stored and stored != remote_rev:
-            print(f"Note: {p.name} already has remote drift — run pull/push/diff "
-                  "first; watch only reacts to changes made after it starts.")
-        tracked[p] = {"doc_id": doc_id, "rev": remote_rev, "mtime": _mtime(p)}
+        tracked[p] = {
+            "doc_id": doc_id,
+            "rev": get_revision(str(p)) or "",
+            "fails": 0,
+            "skip": 0,
+        }
+        conflict = get_conflict(p)
+        if conflict:
+            _emit(json_lines, "conflict", p,
+                  f"unresolved conflict from {conflict.since} — sync is paused "
+                  f"for this file until you resolve it",
+                  conflict=True)
 
     if not tracked:
         print("Nothing to watch.", file=sys.stderr, flush=True)
         sys.exit(1)
 
     mode = "pull-only" if no_push else "two-way"
-    print(f"Watching {len(tracked)} file(s) every {interval}s ({mode}). Ctrl-C to stop.", flush=True)
+    _emit(json_lines, "start", Path("."),
+          f"watching {len(tracked)} file(s) every {interval}s ({mode})",
+          files=[str(p) for p in tracked], interval=interval, mode=mode)
 
-    while True:
-        time.sleep(interval)
+    def _stop(_signum, _frame):
+        raise _Stopped
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _stop)
+        except (ValueError, OSError):
+            pass  # not on the main thread; the KeyboardInterrupt path still works
+
+    # An initial pass, so drift that predates the watcher is handled by the
+    # same safe merge as everything else instead of lying in wait.
+    try:
         for p, t in tracked.items():
-            try:
-                _tick(p, t, docs_service, no_push, pull, push)
-            except SystemExit:
-                print(f"  Warning: sync of {p.name} failed this tick; will retry.",
-                      file=sys.stderr, flush=True)
-            except Exception as e:
-                print(f"  Warning: {p.name}: {e}; will retry.", file=sys.stderr, flush=True)
+            _safe_tick(p, t, docs_service, no_push, force, json_lines,
+                       render_for, push_for)
+        while True:
+            time.sleep(interval)
+            for p, t in tracked.items():
+                if t["skip"] > 0:
+                    t["skip"] -= 1
+                    continue
+                _safe_tick(p, t, docs_service, no_push, force, json_lines,
+                           render_for, push_for)
+    except (_Stopped, KeyboardInterrupt):
+        _emit(json_lines, "stop", Path("."), "watch stopped")
 
 
-def _tick(p: Path, t: dict, docs_service, no_push: bool, pull, push) -> None:
-    remote_rev = docs_service.documents().get(
-        documentId=t["doc_id"], fields="revisionId"
-    ).execute(num_retries=NUM_RETRIES).get("revisionId", "")
+def _safe_tick(p, t, docs_service, no_push, force, json_lines, render_for, push_for) -> None:
+    """One reconcile, with failures isolated to the file that caused them."""
+    try:
+        _tick(p, t, docs_service, no_push, force, json_lines, render_for, push_for)
+        t["fails"] = 0
+    except _Stopped:
+        raise
+    except SystemExit as e:
+        # push()/pull() exit on unrecoverable API problems; a watcher must not
+        # die with them.
+        _fail(p, t, json_lines, f"sync failed (exit {e.code}); will retry")
+    except Exception as e:  # noqa: BLE001
+        _fail(p, t, json_lines, f"{type(e).__name__}: {e}; will retry")
 
-    local_changed = _mtime(p) != t["mtime"]
-    remote_changed = remote_rev != t["rev"]
 
-    if not (local_changed or remote_changed):
+def _fail(p: Path, t: dict, json_lines: bool, detail: str) -> None:
+    t["fails"] += 1
+    if t["fails"] >= _BACKOFF_AFTER:
+        # Skip an exponentially growing number of ticks rather than retrying a
+        # persistent failure on every one.
+        t["skip"] = min(2 ** (t["fails"] - _BACKOFF_AFTER + 1), _BACKOFF_MAX)
+        detail += f" (backing off {t['skip']} tick(s))"
+    _emit(json_lines, "error", p, detail, error=True)
+
+
+def _tick(p, t, docs_service, no_push, force, json_lines, render_for, push_for) -> None:
+    outcome = reconcile(
+        p,
+        t["doc_id"],
+        render=render_for,
+        push=push_for,
+        allow_push=not no_push,
+        force=force,
+        stored_revision=t["rev"],
+        peek_revision=lambda: _peek_revision(docs_service, t["doc_id"]),
+    )
+
+    if outcome.revision and outcome.revision != t["rev"]:
+        t["rev"] = outcome.revision
+        set_revision(str(p), outcome.revision)
+
+    # A quiet tick is the common case and should stay quiet — the editor would
+    # otherwise show a notification every interval for a file nobody touched.
+    # A newly-raised conflict reports as CONFLICT, so suppressing the BLOCKED
+    # ticks that follow it hides repetition, not news.
+    if outcome.action in (NOOP, SKIPPED, BLOCKED):
         return
 
-    stamp = time.strftime("%H:%M:%S")
-
-    if local_changed and remote_changed:
-        conflict = p.with_name(f"{p.stem}.conflict.md")
-        pull(t["doc_id"], conflict)
-        remove_mapping(str(conflict))  # the conflict copy must not steal the mapping
-        print(f"[{stamp}] CONFLICT on {p.name}: both sides changed. "
-              f"Remote saved to {conflict.name}; local left untouched.", flush=True)
-        _notify("gdoc-sync conflict", f"{p.name}: remote saved to {conflict.name}")
-        t["rev"] = remote_rev  # don't re-fire every tick; user merges by hand
-        t["mtime"] = _mtime(p)
-
-    elif remote_changed:
-        print(f"[{stamp}] Remote changed → pulling {p.name}", flush=True)
-        pull(t["doc_id"], p)
-        _notify("gdoc-sync", f"Pulled remote changes into {p.name}")
-        t["rev"] = get_revision(str(p)) or remote_rev
-        t["mtime"] = _mtime(p)
-
-    elif local_changed:
-        if no_push:
-            print(f"[{stamp}] Local change on {p.name} (push disabled with --no-push)", flush=True)
-            t["mtime"] = _mtime(p)
-            return
-        print(f"[{stamp}] Local changed → pushing {p.name}", flush=True)
-        push(p)  # remote is unchanged, so no overwrite prompt can trigger
-        _notify("gdoc-sync", f"Pushed local changes from {p.name}")
-        t["rev"] = get_revision(str(p)) or t["rev"]
-        t["mtime"] = _mtime(p)
+    _emit(
+        json_lines,
+        outcome.action,
+        p,
+        outcome.detail,
+        reload=outcome.wrote_local,
+        pushed=outcome.pushed,
+        conflict=outcome.conflicted,
+        backup=outcome.backup,
+    )

@@ -20,8 +20,15 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from .comments import strip_comments
-from .config import get_clipboard_default, get_font, get_theme, set_doc_id
+from .config import (
+    get_clipboard_command,
+    get_clipboard_default,
+    get_font,
+    get_theme,
+    set_doc_id,
+)
 from .mdutils import copy_to_clipboard, derive_title, pandoc_to_docx, strip_frontmatter
+from .refdoc import styled_reference_docx
 from .services import NUM_RETRIES, get_services
 from .style import apply_styles, apply_table_borders
 
@@ -71,10 +78,16 @@ def create_doc(
 
     body_md = strip_comments(strip_frontmatter(raw_md))
 
+    # Bake the theme into the docx's style definitions so the new doc's named
+    # styles genuinely carry it (see refdoc) rather than having colour painted
+    # over pandoc's blue defaults afterwards.
+    reference_doc = styled_reference_docx(font, theme)
+
     print("Converting markdown → docx via pandoc...")
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = Path(tmpdir) / "doc.docx"
-        pandoc_to_docx(body_md, docx_path, resource_dir=local_path.parent)
+        pandoc_to_docx(body_md, docx_path, resource_dir=local_path.parent,
+                       reference_doc=reference_doc)
 
         print(f"Creating Google Doc: {title}")
         media = MediaFileUpload(str(docx_path), mimetype=DOCX_MIME, resumable=False)
@@ -96,8 +109,11 @@ def create_doc(
         print(f"  Warning: could not apply table borders: {e}")
 
     try:
-        if apply_styles(docs_service, doc_id, font=font, theme=theme):
-            print(f"  Applied font: {font}" + (f" + theme: {theme}" if theme else ""))
+        baked = reference_doc is not None
+        if apply_styles(docs_service, doc_id, font=font, theme=theme, baked=baked):
+            where = "in the doc's named styles" if baked else "to the doc's text"
+            print(f"  Applied font: {font}" + (f" + theme: {theme}" if theme else "")
+                  + f" ({where})")
     except HttpError as e:
         print(f"  Warning: could not apply styling: {e}")
 
@@ -137,11 +153,12 @@ def create_doc(
     print(f"  URL: {url}")
 
     if copy:
-        ok, tool = copy_to_clipboard(url)
+        ok, tool = copy_to_clipboard(url, command=get_clipboard_command())
         if ok:
             print(f"  Copied to clipboard via {tool}")
         else:
-            print("  Warning: no clipboard tool found (tried wl-copy, xclip, pbcopy)")
+            print("  Warning: no clipboard tool found. Install wl-clipboard, xclip, "
+                  "or xsel — or set `clipboard_command:` in your config.")
 
     if open_in_browser:
         try:

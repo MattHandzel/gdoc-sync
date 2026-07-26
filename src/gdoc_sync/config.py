@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import os
 import re
+import sys
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -34,6 +36,10 @@ import yaml
 DEFAULT_FONT = "Garamond"
 DEFAULT_THEME = "professional"
 DEFAULT_SHARE = "comment"  # private | view | comment | edit
+DEFAULT_CONFLICT_STYLE = "markers"  # markers | sidecar
+DEFAULT_WATCH_INTERVAL = 15
+# Below this, polling costs more in API quota than it buys in latency.
+MIN_WATCH_INTERVAL = 5
 
 _config_override: Path | None = None
 
@@ -103,6 +109,44 @@ def get_clipboard_default() -> bool:
     return bool(_setting("clipboard", True))
 
 
+def get_clipboard_command() -> str | None:
+    """An explicit clipboard command, overriding platform auto-detection.
+
+    Set ``clipboard_command:`` when the detected tool is wrong for your setup
+    (a remote session, an unusual multiplexer, a custom clipboard manager).
+    """
+    command = _setting("clipboard_command", None)
+    if isinstance(command, str) and command.strip():
+        return command.strip()
+    if isinstance(command, list) and command:
+        return " ".join(str(c) for c in command)
+    return None
+
+
+def get_conflict_style() -> str:
+    """How an unmergeable conflict is presented.
+
+    ``markers`` (default) writes git-style conflict markers into the file, so
+    the divergence is visible exactly where it happened and any editor's
+    conflict tooling works on it. ``sidecar`` leaves the file untouched and
+    writes the doc's version to ``<name>.remote.md`` instead.
+    """
+    style = _setting("conflict_style", DEFAULT_CONFLICT_STYLE)
+    if isinstance(style, str) and style.strip().lower() in ("markers", "sidecar"):
+        return style.strip().lower()
+    return DEFAULT_CONFLICT_STYLE
+
+
+def get_watch_interval() -> int:
+    """Seconds between watch polls."""
+    raw = _setting("watch_interval", DEFAULT_WATCH_INTERVAL)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_WATCH_INTERVAL
+    return max(value, MIN_WATCH_INTERVAL)
+
+
 def get_custom_themes() -> dict:
     """User-defined themes from the config's ``themes:`` section."""
     themes = load_config().get("themes")
@@ -125,11 +169,53 @@ def state_path() -> Path:
     return base / "gdoc-sync" / "state.yaml"
 
 
+def atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (temp file in the same dir + rename).
+
+    Used for anything whose truncation would be data loss — the state file
+    (which holds every local-file → doc-id mapping) and synced markdown. A
+    plain ``write_text`` interrupted midway leaves a truncated file behind;
+    ``os.replace`` either fully succeeds or leaves the original untouched.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def load_state() -> dict:
+    """Read the state file, tolerating a corrupt one rather than crashing.
+
+    Returning ``{}`` on unparseable YAML would silently discard every mapping
+    on the next save, so the damaged file is moved aside first — the user keeps
+    a recoverable copy and gets told where it went.
+    """
     p = state_path()
-    if p.exists():
-        return yaml.safe_load(p.read_text()) or {}
-    return {}
+    if not p.exists():
+        return {}
+    try:
+        data = yaml.safe_load(p.read_text())
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as e:
+        salvage = p.with_suffix(p.suffix + ".corrupt")
+        try:
+            os.replace(p, salvage)
+            print(f"WARNING: state file was unreadable ({e}); moved to {salvage}",
+                  file=sys.stderr)
+        except OSError:
+            print(f"WARNING: state file is unreadable ({e})", file=sys.stderr)
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def save_state(state: dict) -> None:
@@ -138,9 +224,7 @@ def save_state(state: dict) -> None:
     In legacy combined mode the state file is also the config file, so settings
     keys (font, theme, …) ride along untouched.
     """
-    p = state_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(yaml.dump(state, default_flow_style=False))
+    atomic_write(state_path(), yaml.dump(state, default_flow_style=False))
 
 
 def get_doc_id(local_path: str | os.PathLike) -> str | None:

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from .comments import embed_comments, fetch_comments
-from .config import set_doc_id
+from .config import atomic_write, set_doc_id
 from .convert import doc_to_markdown
 from .services import NUM_RETRIES, get_services
+from .syncstate import backup_file, clear_conflict, set_bases
 
 _IMAGE_EXTS = {
     "image/png": ".png",
@@ -81,12 +83,35 @@ def _make_image_saver(output_path: Path):
     return save, (lambda: counter)
 
 
-def pull(doc_id: str, output_path: Path | None = None, json_out: bool = False) -> str:
-    """Pull a Google Doc (all tabs) and return markdown with embedded comments."""
-    # In --json mode all progress chatter goes to stderr; stdout is the JSON.
-    def say(*args):
-        print(*args, file=sys.stderr if json_out else sys.stdout)
+@dataclass
+class RenderedDoc:
+    """A Google Doc rendered to markdown, with nothing written to disk."""
 
+    markdown: str
+    revision_id: str
+    title: str
+    tabs: int
+    comments: int
+    images: int
+
+
+def render_doc(
+    doc_id: str,
+    *,
+    asset_path: Path | None = None,
+    say=lambda *_: None,
+) -> RenderedDoc:
+    """Fetch a doc and convert it to markdown without touching the local file.
+
+    Split out of :func:`pull` so the sync engine can ask "what does the doc say
+    right now?" as a pure query. Comparing that against the last-synced
+    snapshot is how a real remote edit is told apart from a revisionId bump
+    (Google rewrites the revision on autosave and presence changes, so the id
+    alone is not evidence that anything changed).
+
+    ``asset_path`` is the markdown file inline images should be saved beside;
+    omit it to skip image download entirely.
+    """
     drive_service, docs_service = get_services()
 
     # Fetch WITH tab content (else only the first tab is returned)
@@ -97,8 +122,8 @@ def pull(doc_id: str, output_path: Path | None = None, json_out: bool = False) -
     revision_id = doc.get("revisionId", "")
 
     image_saver, images_saved = None, (lambda: 0)
-    if output_path:
-        image_saver, images_saved = _make_image_saver(output_path)
+    if asset_path is not None:
+        image_saver, images_saved = _make_image_saver(asset_path)
 
     tabs = list(_iter_tabs(doc.get("tabs", [])))
     say(f"Pulling: {title}" + (f"  ({len(tabs)} tabs)" if len(tabs) > 1 else ""))
@@ -121,30 +146,65 @@ def pull(doc_id: str, output_path: Path | None = None, json_out: bool = False) -
     say(f"  {len(comments)} unresolved comment(s)")
     markdown = embed_comments(markdown, comments)
 
+    return RenderedDoc(
+        markdown=markdown,
+        revision_id=revision_id,
+        title=title,
+        tabs=max(len(tabs), 1),
+        comments=len(comments),
+        images=images_saved(),
+    )
+
+
+def preserve_frontmatter(existing: str, markdown: str) -> str:
+    """Re-attach the local file's YAML frontmatter to freshly-pulled markdown.
+
+    Google Docs has nowhere to store frontmatter, so a pull would otherwise
+    drop it every time.
+    """
+    if existing.startswith("---\n"):
+        end_idx = existing.find("\n---\n", 4)
+        if end_idx != -1:
+            return existing[: end_idx + 5] + "\n" + markdown
+    return markdown
+
+
+def pull(doc_id: str, output_path: Path | None = None, json_out: bool = False) -> str:
+    """Pull a Google Doc (all tabs) and return markdown with embedded comments."""
+    # In --json mode all progress chatter goes to stderr; stdout is the JSON.
+    def say(*args):
+        print(*args, file=sys.stderr if json_out else sys.stdout)
+
+    rendered = render_doc(doc_id, asset_path=output_path, say=say)
+    markdown = rendered.markdown
+
     # Preserve existing YAML frontmatter in the local file.
     if output_path and output_path.exists():
-        existing = output_path.read_text()
-        if existing.startswith("---\n"):
-            end_idx = existing.find("\n---\n", 4)
-            if end_idx != -1:
-                frontmatter = existing[: end_idx + 5]
-                markdown = frontmatter + "\n" + markdown
+        markdown = preserve_frontmatter(output_path.read_text(), markdown)
 
     if output_path:
-        output_path.write_text(markdown)
-        set_doc_id(str(output_path), doc_id, revision_id)
+        # Overwriting the user's file is the one irreversible step here, so it
+        # gets a backup and an atomic write.
+        backup_file(output_path, tag="pre-pull")
+        atomic_write(output_path, markdown)
+        set_doc_id(str(output_path), doc_id, rendered.revision_id)
+        # A direct pull is an explicit "make local match remote", so it also
+        # re-establishes the merge ancestors — otherwise the next watch tick
+        # would see the rewritten file as an unexplained local edit.
+        set_bases(output_path, local=markdown, remote=rendered.markdown)
+        clear_conflict(output_path)
         say(f"  Written to {output_path}")
-        if images_saved():
-            say(f"  Downloaded {images_saved()} image(s)")
+        if rendered.images:
+            say(f"  Downloaded {rendered.images} image(s)")
 
     if json_out:
         payload = {
             "doc_id": doc_id,
-            "title": title,
-            "revision_id": revision_id,
-            "tabs": max(len(tabs), 1),
-            "comments": len(comments),
-            "images": images_saved(),
+            "title": rendered.title,
+            "revision_id": rendered.revision_id,
+            "tabs": rendered.tabs,
+            "comments": rendered.comments,
+            "images": rendered.images,
             "output": str(output_path) if output_path else None,
         }
         if not output_path:
