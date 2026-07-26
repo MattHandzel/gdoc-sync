@@ -31,6 +31,7 @@ from .mdutils import copy_to_clipboard, derive_title, pandoc_to_docx, strip_fron
 from .refdoc import styled_reference_docx
 from .services import NUM_RETRIES, get_services
 from .style import apply_styles, apply_table_borders
+from .sync import record_sync_baseline
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -147,6 +148,11 @@ def create_doc(
         try:
             set_doc_id(str(local_path), doc_id)
             print(f"  Mapped {local_path.name} → {doc_id[:12]}...")
+            # The file and the brand-new doc agree right now, which is the one
+            # moment a merge ancestor can be recorded for free. Without it the
+            # first sync/watch sees two texts that differ only by the lossy
+            # round trip and has to ask which side to keep.
+            record_sync_baseline(local_path, doc_id, raw_md)
         except Exception as e:
             print(f"  Warning: could not save mapping: {e}")
 

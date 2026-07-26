@@ -109,4 +109,12 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
         documentId=doc_id, fields="revisionId"
     ).execute(num_retries=NUM_RETRIES).get("revisionId", current_rev)
     set_revision(str(local_path), new_rev)
+
+    # A plain push leaves both sides in agreement, so it is a free chance to
+    # record the merge ancestor. The engine manages its own baselines, so skip
+    # this when the push came from there.
+    if not merged:
+        from .sync import record_sync_baseline
+        record_sync_baseline(local_path, doc_id, markdown)
+
     print("  Pushed successfully.")

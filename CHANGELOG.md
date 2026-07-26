@@ -66,6 +66,11 @@ the API restyling pass entirely. Code keeps its monospace face.
 - New settings: `conflict_style` (`markers`/`sidecar`), `watch_interval`,
   `clipboard_command`.
 - Default watch interval is 15s (was 30s).
+- `create` and a plain `push` now record the sync baseline. Both leave the
+  file and the doc in agreement, which is the one free moment to capture a
+  merge ancestor; without it the *first* `sync`/`watch` on a newly created doc
+  saw two texts differing only by the lossy round trip and — correctly but
+  uselessly — refused to guess which side to keep.
 
 ## 0.5.3 (2026-07-26)
 

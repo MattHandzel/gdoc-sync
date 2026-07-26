@@ -276,6 +276,48 @@ def test_whitespace_only_drift_is_not_an_edit(tmp_path):
 # Safety guards
 # ---------------------------------------------------------------------------
 
+def test_record_sync_baseline_makes_the_first_sync_clean(tmp_path, monkeypatch):
+    """`create`/`push` leave both sides in agreement, so they record the
+    ancestor. Without it the first sync sees two texts that differ only by the
+    lossy round trip and — correctly but uselessly — refuses to guess."""
+    def lossy(md: str) -> str:
+        return md.replace("*emphasis*", "_emphasis_")
+
+    path = tmp_path / "note.md"
+    text = "# Fresh\n\nbody with *emphasis*\n"
+    path.write_text(text)
+    doc = FakeDoc(lossy(text), round_trip=lossy)
+
+    # Without a baseline the divergence is unresolvable.
+    assert run(path, doc).action == sync.CONFLICT
+    syncstate.clear_conflict(path)
+
+    # What create/push now do at the moment the two sides agree.
+    import gdoc_sync.pull
+    monkeypatch.setattr(gdoc_sync.pull, "render_doc",
+                        lambda doc_id, **kw: doc.render())
+    assert sync.record_sync_baseline(path, "doc-id", text)
+    assert syncstate.get_bases(path).known
+    assert syncstate.get_conflict(path) is None
+
+    # And now a fresh sync is a no-op instead of a conflict.
+    assert run(path, doc).action == sync.NOOP
+    assert doc.pushes == 0
+
+
+def test_record_sync_baseline_never_raises(tmp_path, monkeypatch):
+    """A failed baseline costs one prompt later; it must not fail a create."""
+    import gdoc_sync.pull
+
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(gdoc_sync.pull, "render_doc", boom)
+    path = tmp_path / "note.md"
+    path.write_text("x")
+    assert sync.record_sync_baseline(path, "doc-id", "x") is False
+
+
 def test_first_sync_with_divergence_refuses_to_guess(tmp_path):
     path = tmp_path / "note.md"
     path.write_text("# Local version\n\nlocal content here\n")

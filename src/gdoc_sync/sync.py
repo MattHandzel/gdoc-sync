@@ -281,6 +281,33 @@ def _reconcile(
     )
 
 
+def record_sync_baseline(path: Path, doc_id: str, local_text: str | None = None) -> bool:
+    """Record the merge ancestors for a file whose doc now matches it.
+
+    Called after ``create`` and a plain ``push``, both of which leave the two
+    sides in agreement. Without it the file has no ancestor, so the very first
+    ``sync`` or ``watch`` would find two texts that differ — because the
+    round trip is lossy, not because anyone edited anything — and correctly but
+    uselessly refuse to guess which side to keep.
+
+    Best-effort: failing to record a baseline costs one `--adopt-` prompt
+    later, so it must never turn a successful create/push into an error.
+    """
+    from .pull import render_doc
+
+    try:
+        path = Path(path)
+        local = local_text if local_text is not None else path.read_text(encoding="utf-8")
+        rendered = render_doc(doc_id, asset_path=None)
+        set_bases(path, local=local, remote=rendered.markdown)
+        clear_conflict(path)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"  Note: could not record the sync baseline ({e}); "
+              f"the first `gdoc-sync sync` may ask which side to keep.")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
