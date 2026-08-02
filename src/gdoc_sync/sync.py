@@ -427,9 +427,10 @@ def _adopt_local(path: Path, local: str, rendered, push, render, force, say) -> 
 
 
 def _adopt_remote(path: Path, local: str, rendered, say) -> SyncOutcome:
-    from .pull import preserve_frontmatter
+    from .pull import preserve_code_fences, preserve_frontmatter
 
-    text = preserve_frontmatter(local, rendered.markdown)
+    text = preserve_code_fences(local, rendered.markdown)
+    text = preserve_frontmatter(local, text)
     outcome = SyncOutcome(ADOPTED, "", wrote_local=True)
     _write_local(path, text, outcome, tag="pre-adopt-remote")
     set_bases(path, local=text, remote=rendered.markdown)

@@ -17,6 +17,7 @@ from googleapiclient.http import MediaFileUpload
 from .comments import apply_comment_actions, strip_comments
 from .config import get_doc_id, get_font, get_revision, get_theme, set_revision
 from .create import DOCX_MIME
+from .highlight import highlight_theme_for
 from .mdutils import pandoc_to_docx, strip_frontmatter
 from .refdoc import styled_reference_docx
 from .services import NUM_RETRIES, get_services
@@ -80,12 +81,14 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
     # Google Doc's named styles carry the theme instead of having it painted
     # over the top (see refdoc). Falls back to API-side styling if that fails.
     reference_doc = styled_reference_docx(font, theme)
+    highlight_style = highlight_theme_for(theme)
 
     print("Converting markdown → docx via pandoc...")
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = Path(tmpdir) / "doc.docx"
         pandoc_to_docx(body_md, docx_path, resource_dir=local_path.parent,
-                       reference_doc=reference_doc)
+                       reference_doc=reference_doc,
+                       highlight_style=highlight_style)
         media = MediaFileUpload(str(docx_path), mimetype=DOCX_MIME, resumable=False)
         drive_service.files().update(fileId=doc_id, media_body=media).execute(num_retries=NUM_RETRIES)
 

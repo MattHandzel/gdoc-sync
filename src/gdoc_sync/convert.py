@@ -38,11 +38,44 @@ def doc_to_markdown(doc: dict, image_saver=None) -> tuple[str, OffsetMapping]:
     offset_map = OffsetMapping()
     md_pos = 0
 
+    # Contiguous monospace paragraphs are one fenced code block. Tracked across
+    # iterations so a block split over several paragraphs does not become
+    # several fences.
+    in_code = False
+
+    def close_code():
+        nonlocal in_code, md_pos
+        if in_code:
+            md_parts.append("```\n\n")
+            md_pos += 5
+            in_code = False
+
     for element in body:
         if "paragraph" in element:
             para = element["paragraph"]
             gdoc_start = element.get("startIndex", 0)
             gdoc_end = element.get("endIndex", gdoc_start)
+
+            if _is_code_paragraph(para):
+                if not in_code:
+                    if md_parts and not md_parts[-1].endswith("\n\n"):
+                        md_parts.append("\n")
+                        md_pos += 1
+                    # The fence's info string (```python) is NOT recoverable:
+                    # pandoc does not write it into the docx, so the language
+                    # is gone by the time the doc exists. Emit a bare fence —
+                    # structure preserved, language lost. Callers that know the
+                    # original languages can restore them (see pull.py).
+                    md_parts.append("```\n")
+                    md_pos += 4
+                    in_code = True
+                line = _code_paragraph_text(para) + "\n"
+                offset_map.add(gdoc_start, gdoc_end, md_pos, md_pos + len(line))
+                md_parts.append(line)
+                md_pos += len(line)
+                continue
+
+            close_code()
 
             prefix = _paragraph_prefix(para, lists_meta)
             text, runs_md = _convert_paragraph_elements(
@@ -68,6 +101,7 @@ def doc_to_markdown(doc: dict, image_saver=None) -> tuple[str, OffsetMapping]:
             md_pos += len(line)
 
         elif "table" in element:
+            close_code()
             if md_parts and not md_parts[-1].endswith("\n\n"):
                 md_parts.append("\n")
                 md_pos += 1
@@ -76,9 +110,13 @@ def doc_to_markdown(doc: dict, image_saver=None) -> tuple[str, OffsetMapping]:
             md_pos += len(table_md)
 
         elif "sectionBreak" in element:
+            close_code()
             if md_parts and not md_parts[-1].endswith("\n\n"):
                 md_parts.append("\n")
                 md_pos += 1
+
+    # A document ending inside a code block still needs its closing fence.
+    close_code()
 
     result = "".join(md_parts)
     # Clean up excessive blank lines
@@ -122,6 +160,61 @@ def _paragraph_prefix(para: dict, lists_meta: dict) -> str:
     return ""
 
 
+# Google Docs flattens pandoc's "SourceCode" paragraph style to NORMAL_TEXT on
+# import, so the ONLY surviving signal that a paragraph was a fenced code block
+# is that its runs use a monospace font.
+_MONO_FONTS = frozenset({
+    "consolas", "courier", "courier new", "menlo", "monaco",
+    "roboto mono", "source code pro", "inconsolata", "cousine",
+    "liberation mono", "dejavu sans mono", "pt mono", "ubuntu mono",
+})
+
+
+def _is_mono(style: dict) -> bool:
+    fam = style.get("weightedFontFamily", {}).get("fontFamily", "")
+    fam = fam.strip().lower()
+    return bool(fam) and (fam in _MONO_FONTS or "mono" in fam)
+
+
+def _is_code_paragraph(para: dict) -> bool:
+    """True when every visible run in the paragraph is monospace.
+
+    Whitespace-only runs are ignored: Docs emits the paragraph's trailing "\\n"
+    and the soft line breaks *between* code lines in the BODY font, so requiring
+    every run to be monospace would never match a real code block.
+    """
+    seen = False
+    for elem in para.get("elements", []):
+        tr = elem.get("textRun")
+        if not tr:
+            continue
+        content = tr.get("content", "")
+        if not content.strip():
+            continue
+        if not _is_mono(tr.get("textStyle", {})):
+            return False
+        seen = True
+    return seen
+
+
+def _code_paragraph_text(para: dict) -> str:
+    """Raw text of a code paragraph — no emphasis, real newlines.
+
+    Two things must NOT happen here. Syntax highlighting arrives as bold runs
+    (KeywordTok and friends), and running them through the normal converter
+    turns `def` into `**def**`, corrupting the code. And Docs represents the
+    line breaks *inside* one code block as \\x0b (vertical tab), which collapses
+    a multi-line block onto a single line unless translated back to \\n.
+    """
+    out = []
+    for elem in para.get("elements", []):
+        tr = elem.get("textRun")
+        if not tr:
+            continue
+        out.append(tr.get("content", ""))
+    return "".join(out).replace("\x0b", "\n").rstrip("\n")
+
+
 def _convert_paragraph_elements(
     elements: list[dict],
     inline_objects: dict | None = None,
@@ -159,6 +252,16 @@ def _convert_paragraph_elements(
             link = style.get("link", {})
             if link.get("url"):
                 formatted = f"[{formatted.strip()}]({link['url']})"
+
+            # A monospace run inside a normal paragraph is an inline code span.
+            # Docs preserves only the font, so without this `inline code` comes
+            # back as bare prose and the backticks are lost on every pull.
+            # Emphasis is deliberately skipped: markdown does not interpret **
+            # or * inside a code span, so emitting them would corrupt it.
+            elif _is_mono(style):
+                stripped = formatted.strip()
+                md_parts.append(formatted.replace(stripped, f"`{stripped}`"))
+                continue
 
             if style.get("bold"):
                 stripped = formatted.strip()
@@ -304,3 +407,44 @@ def _get_start_index(req: dict) -> int:
         if "startIndex" in r:
             return r["startIndex"]
     return 0
+
+
+def restore_fence_languages(markdown: str, existing: str) -> str:
+    """Re-attach ```language tags that the Docs round trip cannot preserve.
+
+    Pandoc does not write a fence's info string into the docx, so by the time
+    content is a Google Doc the language is simply gone — a pulled block can
+    only come back as a bare ```. That silently downgrades every ```python in
+    the vault on the first pull, and breaks editor highlighting.
+
+    The local file still knows the languages, so reuse them positionally. Only
+    applied when both sides have the SAME number of fenced blocks: if the count
+    differs, blocks were added or removed remotely and position no longer
+    identifies the same block — guessing there would mislabel code, which is
+    worse than an untagged fence.
+    """
+    def langs(text: str) -> list[str]:
+        found, opening = [], True
+        for line in text.splitlines():
+            if line.lstrip().startswith("```"):
+                if opening:
+                    found.append(line.lstrip()[3:].strip())
+                opening = not opening
+        return found
+
+    old = langs(existing)
+    new = langs(markdown)
+    if not old or len(old) != len(new) or not any(old):
+        return markdown
+
+    out, idx, opening = [], 0, True
+    for line in markdown.splitlines(keepends=True):
+        if line.lstrip().startswith("```"):
+            if opening:
+                if not line.strip()[3:].strip() and idx < len(old) and old[idx]:
+                    indent = line[: len(line) - len(line.lstrip())]
+                    line = f"{indent}```{old[idx]}\n"
+                idx += 1
+            opening = not opening
+        out.append(line)
+    return "".join(out)

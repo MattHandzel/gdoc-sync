@@ -27,6 +27,7 @@ from .config import (
     get_theme,
     set_doc_id,
 )
+from .highlight import highlight_theme_for
 from .mdutils import copy_to_clipboard, derive_title, pandoc_to_docx, strip_frontmatter
 from .refdoc import styled_reference_docx
 from .services import NUM_RETRIES, get_services
@@ -83,12 +84,14 @@ def create_doc(
     # styles genuinely carry it (see refdoc) rather than having colour painted
     # over pandoc's blue defaults afterwards.
     reference_doc = styled_reference_docx(font, theme)
+    highlight_style = highlight_theme_for(theme)
 
     print("Converting markdown → docx via pandoc...")
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = Path(tmpdir) / "doc.docx"
         pandoc_to_docx(body_md, docx_path, resource_dir=local_path.parent,
-                       reference_doc=reference_doc)
+                       reference_doc=reference_doc,
+                       highlight_style=highlight_style)
 
         print(f"Creating Google Doc: {title}")
         media = MediaFileUpload(str(docx_path), mimetype=DOCX_MIME, resumable=False)

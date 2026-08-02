@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -133,9 +134,50 @@ def copy_to_clipboard(text: str, command: str | list[str] | None = None) -> tupl
     return False, ""
 
 
+_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$")
+
+
+def ensure_table_blank_lines(markdown: str) -> str:
+    """Insert the blank line GFM requires before a pipe table.
+
+    Obsidian (and most editors Matt writes in) render a table that starts on the
+    line directly after a paragraph. Strict GFM does NOT: without a preceding
+    blank line the table is just part of that paragraph, so pandoc emits ZERO
+    tables and the whole thing lands in the Google Doc as one flattened line of
+    pipe characters. The markdown looks correct in the editor and silently
+    arrives broken in the doc, which is the worst kind of failure.
+
+    Rather than make the author remember a rule their editor does not enforce,
+    normalise it here. Fenced code blocks are skipped — a table-looking line
+    inside ``` is content, not a table.
+    """
+    lines = markdown.split("\n")
+    out: list[str] = []
+    in_fence = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if (
+            not in_fence
+            and stripped.startswith("|")
+            and i + 1 < len(lines)
+            and _TABLE_SEP.match(lines[i + 1])
+            and out
+            and out[-1].strip()
+            and not out[-1].strip().startswith("|")
+        ):
+            out.append("")
+        out.append(line)
+    return "\n".join(out)
+
+
 def pandoc_to_docx(markdown_body: str, output_path: Path,
                    resource_dir: Path | None = None,
-                   reference_doc: Path | None = None) -> None:
+                   reference_doc: Path | None = None,
+                   highlight_style: Path | None = None) -> None:
     """Convert markdown to docx via pandoc. Raises with a helpful message on failure.
 
     ``resource_dir`` (usually the markdown file's directory) lets pandoc
@@ -146,6 +188,7 @@ def pandoc_to_docx(markdown_body: str, output_path: Path,
     *innate* to the resulting Google Doc rather than painted on afterwards
     (see :mod:`.refdoc`).
     """
+    markdown_body = ensure_table_blank_lines(markdown_body)
     cmd = [
         "pandoc",
         "-f", "gfm+yaml_metadata_block",
@@ -156,6 +199,10 @@ def pandoc_to_docx(markdown_body: str, output_path: Path,
         cmd += ["--resource-path", str(resource_dir)]
     if reference_doc is not None:
         cmd += ["--reference-doc", str(reference_doc)]
+    # Without this pandoc highlights fenced code with its built-in `pygments`
+    # style, which ignores the document theme entirely.
+    if highlight_style is not None:
+        cmd += ["--highlight-style", str(highlight_style)]
     try:
         proc = subprocess.run(
             cmd,

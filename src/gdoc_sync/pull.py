@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .comments import embed_comments, fetch_comments
 from .config import atomic_write, set_doc_id
-from .convert import doc_to_markdown
+from .convert import doc_to_markdown, restore_fence_languages
 from .services import NUM_RETRIES, get_services
 from .syncstate import backup_file, clear_conflict, set_bases
 
@@ -156,6 +156,11 @@ def render_doc(
     )
 
 
+def preserve_code_fences(existing: str, markdown: str) -> str:
+    """Restore ```language tags lost in the Docs round trip (see convert)."""
+    return restore_fence_languages(markdown, existing)
+
+
 def preserve_frontmatter(existing: str, markdown: str) -> str:
     """Re-attach the local file's YAML frontmatter to freshly-pulled markdown.
 
@@ -178,9 +183,12 @@ def pull(doc_id: str, output_path: Path | None = None, json_out: bool = False) -
     rendered = render_doc(doc_id, asset_path=output_path, say=say)
     markdown = rendered.markdown
 
-    # Preserve existing YAML frontmatter in the local file.
+    # Preserve what the round trip cannot carry: the local file's YAML
+    # frontmatter, and the ```language tags pandoc never wrote into the docx.
     if output_path and output_path.exists():
-        markdown = preserve_frontmatter(output_path.read_text(), markdown)
+        existing = output_path.read_text()
+        markdown = preserve_code_fences(existing, markdown)
+        markdown = preserve_frontmatter(existing, markdown)
 
     if output_path:
         # Overwriting the user's file is the one irreversible step here, so it

@@ -45,6 +45,37 @@ def _ramp(title, subtitle, h1, h2, h3, rest):
     }
 
 
+# Syntax colors for fenced code blocks, keyed by skylighting's token names
+# (pandoc's highlighter). Without this pandoc falls back to its built-in
+# `pygments` style, so a catppuccin doc got 1990s-green keywords in its code
+# blocks while every other element followed the theme.
+#
+# The groupings mirror how a treesitter theme assigns captures, so a fence in
+# the Google Doc lands on the same accent as the same fence in the editor.
+def _code(keyword, string, number, comment, function, type_, operator, variable):
+    return {
+        # @keyword, @keyword.import, @keyword.directive
+        "Keyword": keyword, "ControlFlow": keyword,
+        "Import": keyword, "Preprocessor": keyword,
+        # @string and its relatives
+        "String": string, "VerbatimString": string,
+        "SpecialString": string, "Char": string,
+        # @number / @boolean / @constant
+        "DecVal": number, "BaseN": number, "Float": number, "Constant": number,
+        # @comment
+        "Comment": comment, "Documentation": comment,
+        "CommentVar": comment, "Annotation": comment,
+        # @function
+        "Function": function, "BuiltIn": function,
+        # @type / @attribute
+        "DataType": type_, "Attribute": type_,
+        # @operator
+        "Operator": operator, "SpecialChar": operator,
+        # plain identifiers and anything unclassified
+        "Variable": variable, "Normal": variable, "Other": variable,
+    }
+
+
 THEMES: dict[str, dict] = {
     # The default: what a shared business/work doc is expected to look like.
     # Paginated, near-black body text, navy heading ramp, standard link blue.
@@ -55,6 +86,7 @@ THEMES: dict[str, dict] = {
         "pageless": False,
         "headings": _ramp("#1f3864", "#595959",
                           "#1f3864", "#2f5496", "#4472c4", "#44546a"),
+        "code": _code("#7a3e9d", "#0b7261", "#9a4600", "#5f6368", "#1a4fa0", "#8a6d00", "#5f6368", "#202124"),
     },
     # Black on white, no accent color anywhere. For people who want styling
     # limited to the font.
@@ -64,6 +96,7 @@ THEMES: dict[str, dict] = {
         "link": "#0b57d0",
         "pageless": True,
         "headings": {k: "#000000" for k in _HEADING_KEYS + ["TITLE", "SUBTITLE"]},
+        "code": _code("#000000", "#000000", "#000000", "#5f6368", "#000000", "#000000", "#000000", "#000000"),
     },
     "catppuccin-latte": {
         "background": "#ffffff",  # white page (kept white by request)
@@ -71,6 +104,7 @@ THEMES: dict[str, dict] = {
         "link": "#1155cc",        # normal Google Docs hyperlink blue
         "pageless": True,
         "headings": _rainbow("#d20f39", "#fe640b", "#df8e1d", "#40a02b", "#1e66f5", "#8839ef"),
+        "code": _code("#8839ef", "#40a02b", "#fe640b", "#9ca0b0", "#1e66f5", "#df8e1d", "#04a5e5", "#4c4f69"),
     },
     "catppuccin-mocha": {
         "background": "#1e1e2e",
@@ -78,6 +112,7 @@ THEMES: dict[str, dict] = {
         "link": "#89b4fa",
         "pageless": True,
         "headings": _rainbow("#f38ba8", "#fab387", "#f9e2af", "#a6e3a1", "#89b4fa", "#cba6f7"),
+        "code": _code("#cba6f7", "#a6e3a1", "#fab387", "#6c7086", "#89b4fa", "#f9e2af", "#89dceb", "#cdd6f4"),
     },
     "catppuccin-frappe": {
         "background": "#303446",
@@ -85,6 +120,7 @@ THEMES: dict[str, dict] = {
         "link": "#8caaee",
         "pageless": True,
         "headings": _rainbow("#e78284", "#ef9f76", "#e5c890", "#a6d189", "#8caaee", "#ca9ee6"),
+        "code": _code("#ca9ee6", "#a6d189", "#ef9f76", "#737994", "#8caaee", "#e5c890", "#99d1db", "#c6d0f5"),
     },
     "catppuccin-macchiato": {
         "background": "#24273a",
@@ -92,6 +128,7 @@ THEMES: dict[str, dict] = {
         "link": "#8aadf4",
         "pageless": True,
         "headings": _rainbow("#ed8796", "#f5a97f", "#eed49f", "#a6da95", "#8aadf4", "#c6a0f6"),
+        "code": _code("#c6a0f6", "#a6da95", "#f5a97f", "#6e738d", "#8aadf4", "#eed49f", "#91d7e3", "#cad3f5"),
     },
 }
 
@@ -122,6 +159,20 @@ def _normalize_theme(raw: dict) -> dict:
     else:
         headings = {str(k).upper(): v for k, v in dict(headings).items()}
     palette["headings"] = headings
+
+    # Code-block syntax colors. A user theme may give the eight roles
+    # (keyword/string/number/comment/function/type/operator/variable) and get a
+    # full skylighting token map, or a complete token map directly. Omitting it
+    # is fine — pandoc then keeps its default highlight style.
+    code = raw.get("code")
+    if isinstance(code, dict) and code:
+        roles = ("keyword", "string", "number", "comment",
+                 "function", "type", "operator", "variable")
+        if any(r in code for r in roles):
+            body = palette["text"]
+            palette["code"] = _code(*[code.get(r, body) for r in roles])
+        else:
+            palette["code"] = {str(k): v for k, v in code.items()}
     return palette
 
 
