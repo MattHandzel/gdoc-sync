@@ -13,7 +13,15 @@ That is the whole object. There is no LaTeX, no MathML, no text, not even a
 length hint — the API exposes nothing about an equation's contents. So a pull
 cannot reconstruct the source, and before this module every equation simply
 vanished: ``$I$ — count of insights`` came back as ``— count of insights``.
-Silently, with `watch` running, straight into the file on disk.
+
+Which paths that reached is worth stating precisely. ``pull`` and
+``--adopt-remote`` overwrite the local file with the rendered doc, so both
+deleted equations outright and silently. ``watch`` did **not**: the three-way
+merge compares each side against its own snapshot, and since the ancestor was
+rendered just as lossily, the deletion cancels out and the local LaTeX
+survives. What the watcher did instead was raise a spurious *conflict* every
+time someone edited a line an equation sat on — ours and theirs both differ
+from a base that is missing the formula.
 
 The fix has two halves:
 

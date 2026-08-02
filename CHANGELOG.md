@@ -8,9 +8,14 @@ Pushing LaTeX always worked — pandoc turns `$x$` and `$$...$$` into OMML and
 Drive imports that as a *native* Google Docs equation. Pulling destroyed it.
 The Docs API returns an equation as `{"equation": {}}` and nothing else: no
 LaTeX, no MathML, not even a length. The converter had no text to emit, so
-every formula was silently deleted on the way back. `$I$ — count of insights`
-came back as `— count of insights`, and with `watch` running that reached disk
-without anyone touching anything.
+every formula was silently deleted on the way back: `$I$ — count of insights`
+came back as `— count of insights`.
+
+`pull` and `--adopt-remote` overwrite the file with that render, so both lost
+equations outright and without a word. `watch` did not — the three-way merge
+compares each side against its own snapshot, and an ancestor rendered just as
+lossily cancels the deletion out. What the watcher did instead was raise a
+spurious *conflict* whenever anyone edited a line an equation sat on.
 
 Equations now survive:
 
@@ -23,8 +28,8 @@ Equations now survive:
 - Whatever genuinely cannot be matched becomes a visible `` `[equation]` ``
   marker plus a warning carrying the count — never a silent deletion.
 - This happens inside `render_doc`, so `sync`, `watch` and `--adopt-remote` are
-  covered too, not only `pull`. Restoring in `pull` alone would have left the
-  watcher deleting equations on its next tick.
+  covered too, not only `pull` — which also retires the spurious conflicts,
+  because the ancestor and the doc now agree with the file about the math.
 - LaTeX pandoc cannot parse (`$m^$` — a superscript with no argument) is now
   reported at push time. Pandoc warns, writes it into the doc as literal text
   and exits 0, so previously the only evidence was a formula-shaped hole in a

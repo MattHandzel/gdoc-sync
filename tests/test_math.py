@@ -157,6 +157,36 @@ def test_malformed_latex_next_to_good_math_does_not_unmatch_it():
     assert lost == 0
 
 
+def test_restoration_retires_the_spurious_merge_conflict():
+    """What the lossy render actually cost on the `watch` path.
+
+    It did not delete equations there — the three-way merge compares each side
+    against its own snapshot, and an ancestor rendered just as lossily cancels
+    the deletion out. What it did was conflict: with the formula missing from
+    the base, *both* sides differed from it, so any prose edit on an equation's
+    line stopped the watcher and demanded a hand resolution. Restoring the math
+    before the comparison is what makes this an ordinary clean merge.
+    """
+    from gdoc_sync.merge import merge3
+
+    local = "Let $I$ be the count of high-quality insights.\n"
+    base_render = f"Let {PLACEHOLDER} be the count of high-quality insights.\n"
+    their_render = f"Let {PLACEHOLDER} be the count of high quality insights.\n"
+
+    # Pre-fix: the renders reached the merge with the equation missing.
+    before = merge3(local, base_render, their_render,
+                    label_ours="local", label_base="base", label_theirs="doc")
+    assert before.conflicted
+
+    # Now: every render is restored first, so only the typo fix differs.
+    base, _ = restore_math(base_render, local)
+    theirs, _ = restore_math(their_render, local)
+    after = merge3(local, base, theirs,
+                   label_ours="local", label_base="base", label_theirs="doc")
+    assert not after.conflicted
+    assert after.text == "Let $I$ be the count of high quality insights.\n"
+
+
 def test_no_local_math_leaves_visible_placeholders():
     out, lost = restore_math(f"See {PLACEHOLDER} here.\n", "no math at all\n")
     assert out == f"See {PLACEHOLDER} here.\n"
