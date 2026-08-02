@@ -218,3 +218,20 @@ def pandoc_to_docx(markdown_body: str, output_path: Path,
         ) from None
     if proc.returncode != 0:
         raise RuntimeError(f"pandoc failed (exit {proc.returncode}):\n{proc.stderr}")
+
+    # Malformed LaTeX is not an error to pandoc: it warns, writes the formula
+    # into the docx as literal text, and exits 0. The doc then shows `$m^$`
+    # where an equation was meant to be, which is easy to miss in a long
+    # document and impossible to explain after the fact. Say so out loud.
+    for formula in unconvertible_math(proc.stderr):
+        print(f"  Note: {formula} is not valid LaTeX — it will appear in the "
+              f"doc as literal text, not a formula.")
+
+
+_MATH_WARNING = re.compile(r"^\[WARNING\] Could not convert TeX math (.*), rendering as TeX:",
+                           re.MULTILINE)
+
+
+def unconvertible_math(pandoc_stderr: str) -> list[str]:
+    """The formulas pandoc could not turn into equations, as it reported them."""
+    return _MATH_WARNING.findall(pandoc_stderr or "")

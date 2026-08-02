@@ -10,6 +10,7 @@ from pathlib import Path
 from .comments import embed_comments, fetch_comments
 from .config import atomic_write, set_doc_id
 from .convert import doc_to_markdown, restore_fence_languages
+from .mathmd import restore_math
 from .services import NUM_RETRIES, get_services
 from .syncstate import backup_file, clear_conflict, set_bases
 
@@ -99,6 +100,7 @@ def render_doc(
     doc_id: str,
     *,
     asset_path: Path | None = None,
+    local_text: str | None = None,
     say=lambda *_: None,
 ) -> RenderedDoc:
     """Fetch a doc and convert it to markdown without touching the local file.
@@ -111,6 +113,14 @@ def render_doc(
 
     ``asset_path`` is the markdown file inline images should be saved beside;
     omit it to skip image download entirely.
+
+    ``local_text`` supplies the current contents of that file for restoring
+    what the round trip cannot carry — today, the LaTeX behind each equation
+    (see :mod:`.mathmd`). It defaults to reading ``asset_path``. This happens
+    *here* rather than in :func:`pull` on purpose: the sync engine compares
+    ``rendered.markdown`` against its stored ancestor and merges it into the
+    file, so a restoration applied only on the `pull` path would leave `watch`
+    quietly deleting every equation on its next tick.
     """
     drive_service, docs_service = get_services()
 
@@ -140,6 +150,19 @@ def render_doc(
         markdown = _tab_to_markdown(tabs[0][1], image_saver)
     else:  # no tab metadata at all — legacy top-level body
         markdown, _ = doc_to_markdown(doc, image_saver=image_saver)
+
+    # Put the LaTeX back before anything compares, merges or writes this text.
+    if local_text is None and asset_path is not None and asset_path.exists():
+        try:
+            local_text = asset_path.read_text(encoding="utf-8")
+        except OSError:
+            local_text = None
+    if local_text is not None:
+        markdown, lost = restore_math(markdown, local_text)
+        if lost:
+            say(f"  WARNING: {lost} equation(s) could not be matched to local "
+                f"LaTeX and are marked `[equation]` — the Docs API does not "
+                f"expose equation contents. Check them before saving.")
 
     # Comments are anchored by quoted text, so tabs are fine.
     comments = fetch_comments(drive_service, doc_id)

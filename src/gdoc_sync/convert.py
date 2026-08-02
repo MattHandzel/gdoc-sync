@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .mathmd import PLACEHOLDER as MATH_PLACEHOLDER
+
 
 @dataclass
 class OffsetMapping:
@@ -227,6 +229,16 @@ def _convert_paragraph_elements(
     for elem in elements:
         text_run = elem.get("textRun")
         if not text_run:
+            # An equation arrives as a bare `{"equation": {}}` — the API
+            # exposes nothing whatsoever about its contents, so there is no
+            # LaTeX to recover at this level. Emit a placeholder so the
+            # equation is at least visible; `pull` swaps in the real source
+            # from the local file (see :mod:`.mathmd`). Without this the
+            # element is skipped and the sentence silently loses its formula.
+            if "equation" in elem:
+                md_parts.append(MATH_PLACEHOLDER)
+                continue
+
             obj_id = elem.get("inlineObjectElement", {}).get("inlineObjectId")
             if obj_id and image_saver and inline_objects:
                 uri = (

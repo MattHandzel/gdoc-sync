@@ -298,7 +298,11 @@ def record_sync_baseline(path: Path, doc_id: str, local_text: str | None = None)
     try:
         path = Path(path)
         local = local_text if local_text is not None else path.read_text(encoding="utf-8")
-        rendered = render_doc(doc_id, asset_path=None)
+        # ``local_text`` is what lets the baseline carry the file's LaTeX. Skip
+        # it and the ancestor holds `[equation]` placeholders while every later
+        # render holds the real math, so the first tick reports a remote edit
+        # that never happened.
+        rendered = render_doc(doc_id, asset_path=None, local_text=local)
         set_bases(path, local=local, remote=rendered.markdown)
         clear_conflict(path)
         return True

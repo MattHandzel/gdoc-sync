@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.7.0 (2026-08-02)
+
+### Pull no longer deletes your equations
+
+Pushing LaTeX always worked — pandoc turns `$x$` and `$$...$$` into OMML and
+Drive imports that as a *native* Google Docs equation. Pulling destroyed it.
+The Docs API returns an equation as `{"equation": {}}` and nothing else: no
+LaTeX, no MathML, not even a length. The converter had no text to emit, so
+every formula was silently deleted on the way back. `$I$ — count of insights`
+came back as `— count of insights`, and with `watch` running that reached disk
+without anyone touching anything.
+
+Equations now survive:
+
+- Each is restored from the local file, the only remaining copy of the source.
+  A round trip is lossless even when reviewers rewrite the prose around the
+  math, reflow paragraphs, or comment throughout.
+- Restoration aligns paragraph by paragraph rather than on a whole-file count,
+  so an equation added in Google Docs costs only its own paragraph instead of
+  blanking every formula in the document.
+- Whatever genuinely cannot be matched becomes a visible `` `[equation]` ``
+  marker plus a warning carrying the count — never a silent deletion.
+- This happens inside `render_doc`, so `sync`, `watch` and `--adopt-remote` are
+  covered too, not only `pull`. Restoring in `pull` alone would have left the
+  watcher deleting equations on its next tick.
+- LaTeX pandoc cannot parse (`$m^$` — a superscript with no argument) is now
+  reported at push time. Pandoc warns, writes it into the doc as literal text
+  and exits 0, so previously the only evidence was a formula-shaped hole in a
+  shared document.
+
+Verified end to end against a real 26 KB document carrying 128 equations: 126
+imported as native Google Docs equations, the 2 malformed ones reported, and
+all 128 spans byte-identical after a full create → pull round trip.
+
 ## 0.6.0 (2026-07-26)
 
 ### Two-way sync no longer loses edits

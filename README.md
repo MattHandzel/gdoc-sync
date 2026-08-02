@@ -217,6 +217,44 @@ notifications use `osascript`, and config lives at `~/.config/gdoc-sync/`.
 Install pandoc with `brew install pandoc`. CI runs the test suite on macOS on
 every commit.
 
+## Math (LaTeX)
+
+`$x$` and `$$...$$` become **native Google Docs equations** — real equations a
+reviewer can click into and edit, not pictures of formulas. Nothing to enable:
+
+```markdown
+$$Y_{\text{eff}} = \frac{I}{T}, \qquad Y_{\text{tot}} = Y_{\text{eff}} \cdot \frac{B}{c}$$
+
+$I$ — count of insights in a period; $T$ — tokens consumed, in millions.
+```
+
+Dollar signs in prose stay prose: `it costs $5 and $10` is not math, following
+pandoc's rule that a delimiter is never preceded or followed by a space. `\$`
+escapes explicitly, and math inside `` `code` `` or a fenced block is left
+alone.
+
+Pulling is the hard direction, because the Docs API returns every equation as
+an empty object — no LaTeX, no MathML, no text at all:
+
+```json
+{"startIndex": 12, "endIndex": 53, "equation": {}}
+```
+
+The source therefore cannot be read back out of the doc; it is restored from
+your local file, the only copy that still has it. What follows from that:
+
+- A round trip is **lossless** so long as the equations themselves were not
+  edited in Google Docs — including when reviewers rewrite the prose around
+  them, move paragraphs, or comment throughout.
+- An equation **edited in Google Docs cannot be detected**. There is nothing in
+  the API response to compare against, so your local LaTeX wins.
+- An equation **added in Google Docs** has no local counterpart and arrives as
+  a visible `` `[equation]` `` marker, with a warning saying how many. Nothing
+  is ever dropped silently, and only the paragraph that actually changed is
+  affected — not the rest of the file.
+- LaTeX pandoc cannot parse (`$m^$`) is reported when you push, and appears in
+  the doc as literal text instead of a formula.
+
 ## Limitations (honest ones)
 
 - **New anchored comments can't be created through the API.** Google's Drive
