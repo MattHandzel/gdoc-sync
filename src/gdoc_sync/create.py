@@ -31,7 +31,7 @@ from .highlight import highlight_theme_for
 from .mdutils import copy_to_clipboard, derive_title, pandoc_to_docx, strip_frontmatter
 from .refdoc import styled_reference_docx
 from .services import NUM_RETRIES, get_services
-from .style import apply_styles, apply_table_borders
+from .style import apply_document_styling
 from .sync import record_sync_baseline
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -105,16 +105,15 @@ def create_doc(
     url = created.get("webViewLink") or f"https://docs.google.com/document/d/{doc_id}/edit"
 
     # pandoc tables import without visible borders — set them explicitly.
-    try:
-        n = apply_table_borders(docs_service, doc_id)
-        if n:
-            print(f"  Applied visible borders to {n} table(s)")
-    except HttpError as e:
-        print(f"  Warning: could not apply table borders: {e}")
-
+    # Styling and table borders go up as one fetch and one batch; as two calls
+    # apiece this was four sequential round trips, about a second of the push.
     try:
         baked = reference_doc is not None
-        if apply_styles(docs_service, doc_id, font=font, theme=theme, baked=baked):
+        styled, n = apply_document_styling(
+            docs_service, doc_id, font=font, theme=theme, baked=baked)
+        if n:
+            print(f"  Applied visible borders to {n} table(s)")
+        if styled:
             where = "in the doc's named styles" if baked else "to the doc's text"
             print(f"  Applied font: {font}" + (f" + theme: {theme}" if theme else "")
                   + f" ({where})")

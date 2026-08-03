@@ -14,6 +14,8 @@ Themes are the built-ins below plus any user-defined themes from the config's
 
 from __future__ import annotations
 
+from googleapiclient.errors import HttpError
+
 from .services import NUM_RETRIES
 
 # ---------------------------------------------------------------------------
@@ -255,9 +257,27 @@ def apply_styles(
     Returns True if a request was sent, False if there was nothing to style.
     """
     doc = docs_service.documents().get(documentId=doc_id).execute(num_retries=NUM_RETRIES)
+    requests = style_requests(doc, font=font, theme=theme, baked=baked)
+    if not requests:
+        return False
+    docs_service.documents().batchUpdate(
+        documentId=doc_id, body={"requests": requests}
+    ).execute(num_retries=NUM_RETRIES)
+    return True
+
+
+def style_requests(doc: dict, *, font: str | None = None,
+                   theme: str | None = None, baked: bool = False) -> list[dict]:
+    """Build :func:`apply_styles`' requests for an already-fetched ``doc``.
+
+    Split out so a caller can merge them with other requests into one
+    batchUpdate. `create` and `push` both style *and* border the same document,
+    and doing that as two fetches plus two batches cost about a second of round
+    trips on every push — see :func:`apply_document_styling`.
+    """
     body_content = doc.get("body", {}).get("content", [])
     if not body_content:
-        return False
+        return []
 
     if baked:
         font = None  # already in the named styles; re-applying would clear bold
@@ -265,7 +285,7 @@ def apply_styles(
     doc_end = body_content[-1].get("endIndex", 1)
     # Body starts at index 1; the trailing newline at doc_end-1 can't be styled.
     if doc_end <= 2:
-        return False
+        return []
     cap = doc_end - 1
     full_range = {"startIndex": 1, "endIndex": cap}
 
@@ -397,13 +417,7 @@ def apply_styles(
                 }
             })
 
-    if not requests:
-        return False
-
-    docs_service.documents().batchUpdate(
-        documentId=doc_id, body={"requests": requests}
-    ).execute(num_retries=NUM_RETRIES)
-    return True
+    return requests
 
 
 # Backwards-compatible alias for the font-only entry point.
@@ -432,6 +446,19 @@ def apply_table_borders(docs_service, doc_id: str, width_pt: float = 1.0) -> int
     explicitly via the Docs API. Returns the number of tables styled.
     """
     doc = docs_service.documents().get(documentId=doc_id).execute(num_retries=NUM_RETRIES)
+    requests, tables = table_border_requests(doc, width_pt)
+    if requests:
+        docs_service.documents().batchUpdate(
+            documentId=doc_id, body={"requests": requests}
+        ).execute(num_retries=NUM_RETRIES)
+    return tables
+
+
+def table_border_requests(doc: dict, width_pt: float = 1.0) -> tuple[list[dict], int]:
+    """Build :func:`apply_table_borders`' requests for an already-fetched ``doc``.
+
+    Returns ``(requests, table_count)``.
+    """
     body = doc.get("body", {}).get("content", [])
     border = _solid_border(width_pt)
 
@@ -469,8 +496,51 @@ def apply_table_borders(docs_service, doc_id: str, width_pt: float = 1.0) -> int
             }
         })
 
-    if requests:
+    return requests, tables
+
+
+def apply_document_styling(
+    docs_service,
+    doc_id: str,
+    *,
+    font: str | None = None,
+    theme: str | None = None,
+    baked: bool = False,
+    table_width_pt: float = 1.0,
+) -> tuple[bool, int]:
+    """Style the document and border its tables in ONE fetch and ONE batch.
+
+    `create` and `push` both need styling and table borders applied to the same
+    freshly-uploaded document. Doing that through :func:`apply_styles` and
+    :func:`apply_table_borders` meant four sequential API round trips — two
+    fetches of the same document, then two batches — which measured at roughly
+    1.1 seconds, the single largest cost in a push after the upload itself.
+
+    Merging them is safe because none of these requests move text: character
+    styling, table-cell styling and document style all leave every index where
+    it was, so the offsets read from one fetch stay valid for the whole batch.
+    Ordering within the batch is preserved as well, which is what the font/bold
+    interaction in :func:`style_requests` relies on.
+
+    Returns ``(styled, tables_bordered)``.
+    """
+    doc = docs_service.documents().get(documentId=doc_id).execute(num_retries=NUM_RETRIES)
+    requests = style_requests(doc, font=font, theme=theme, baked=baked)
+    border_requests, tables = table_border_requests(doc, table_width_pt)
+    requests += border_requests
+
+    if not requests:
+        return False, 0
+
+    try:
         docs_service.documents().batchUpdate(
             documentId=doc_id, body={"requests": requests}
         ).execute(num_retries=NUM_RETRIES)
-    return tables
+        return True, tables
+    except HttpError:
+        # A batch is all-or-nothing, so one malformed table request would now
+        # also cost the document its styling — resilience the two-call version
+        # had for free. Fall back to the slow path rather than trade
+        # correctness for the round trips.
+        styled = apply_styles(docs_service, doc_id, font=font, theme=theme, baked=baked)
+        return styled, apply_table_borders(docs_service, doc_id, table_width_pt)

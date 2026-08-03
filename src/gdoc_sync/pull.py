@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,15 +120,54 @@ def render_doc(
     (see :mod:`.mathmd`). It defaults to reading ``asset_path``. This happens
     *here* rather than in :func:`pull` on purpose: the sync engine compares
     ``rendered.markdown`` against its stored ancestor and merges it into the
-    file, so a restoration applied only on the `pull` path would leave `watch`
-    quietly deleting every equation on its next tick.
+    file, so restoring only on the `pull` path would leave every prose edit
+    near an equation surfacing as a conflict on the next watch tick.
     """
     drive_service, docs_service = get_services()
 
-    # Fetch WITH tab content (else only the first tab is returned)
-    doc = docs_service.documents().get(
-        documentId=doc_id, includeTabsContent=True
-    ).execute(num_retries=NUM_RETRIES)
+    # The body and the comments are independent requests, each a round trip of
+    # roughly 200ms, and they were being made one after the other. Overlapping
+    # them — and converting the doc to markdown while the comments are still in
+    # flight — is most of a render's wall clock, paid by every pull, every sync
+    # and every watch tick that gets past the revision peek.
+    #
+    # Safe to thread: `drive_service` and `docs_service` are separate clients
+    # with separate httplib2 connections (httplib2 itself is not thread-safe,
+    # so sharing one would not be), and get_credentials() has already refreshed
+    # the token, so neither thread can trigger a concurrent refresh.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending_comments = pool.submit(fetch_comments, drive_service, doc_id)
+        try:
+            # Fetch WITH tab content (else only the first tab is returned)
+            doc = docs_service.documents().get(
+                documentId=doc_id, includeTabsContent=True
+            ).execute(num_retries=NUM_RETRIES)
+        except BaseException:
+            # Collect the sibling's outcome so a failed render reports the
+            # error the caller asked about, not an unretrieved-exception noise
+            # message from the interpreter on the way out.
+            pending_comments.exception()
+            raise
+        markdown, title, revision_id, tab_count, images_saved = _render_body(
+            doc, asset_path=asset_path, local_text=local_text, say=say)
+        comments = pending_comments.result()
+
+    say(f"  {len(comments)} unresolved comment(s)")
+    markdown = embed_comments(markdown, comments)
+
+    return RenderedDoc(
+        markdown=markdown,
+        revision_id=revision_id,
+        title=title,
+        tabs=max(tab_count, 1),
+        comments=len(comments),
+        images=images_saved(),
+    )
+
+
+def _render_body(doc, *, asset_path, local_text, say):
+    """Convert a fetched doc to markdown. Split out so it can run while the
+    comments request is still in flight."""
     title = doc.get("title", "Untitled")
     revision_id = doc.get("revisionId", "")
 
@@ -164,19 +204,7 @@ def render_doc(
                 f"LaTeX and are marked `[equation]` — the Docs API does not "
                 f"expose equation contents. Check them before saving.")
 
-    # Comments are anchored by quoted text, so tabs are fine.
-    comments = fetch_comments(drive_service, doc_id)
-    say(f"  {len(comments)} unresolved comment(s)")
-    markdown = embed_comments(markdown, comments)
-
-    return RenderedDoc(
-        markdown=markdown,
-        revision_id=revision_id,
-        title=title,
-        tabs=max(len(tabs), 1),
-        comments=len(comments),
-        images=images_saved(),
-    )
+    return markdown, title, revision_id, len(tabs), images_saved
 
 
 def preserve_code_fences(existing: str, markdown: str) -> str:

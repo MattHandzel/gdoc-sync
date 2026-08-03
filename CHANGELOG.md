@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.1 (2026-08-02)
+
+### Fewer round trips
+
+Every measurement below is a median of interleaved before/after runs against
+the real API, on a 26 KB document.
+
+- **`create` and `push`: 288 ms faster (780 → 491 ms of styling).** Applying
+  the theme and applying table borders each fetched the whole document and then
+  sent its own batch — four sequential round trips over the same document, for
+  two operations whose requests can simply be concatenated. They now share one
+  fetch and one batch. Safe because none of these requests move text: character
+  styling, table-cell styling and document style all leave every index where it
+  was. If the combined batch fails, it falls back to the two separate calls, so
+  a single malformed table cannot also cost the document its styling.
+- **Every `pull`, `sync` and `watch` tick: 75 ms faster (446 → 371 ms).** The
+  document body and its comments are independent requests that were made one
+  after the other; they now overlap, and the markdown conversion runs while the
+  comments are still in flight.
+
+Two things deliberately left alone, having been measured rather than assumed:
+CLI startup (34 ms, with the Google client libraries already imported lazily),
+and the Neovim statusline component (2.3 us per redraw).
+
 ## 0.7.0 (2026-08-02)
 
 ### Pull no longer deletes your equations
