@@ -1,6 +1,6 @@
 """Google Docs JSON → markdown conversion."""
 
-from gdoc_sync.convert import doc_to_markdown
+from gdoc_sync.convert import doc_to_markdown, restore_fence_languages
 
 
 def _run(text, **style):
@@ -131,3 +131,47 @@ def test_blocks_separated_by_blank_lines():
     assert "- item one\n- item two" in md          # list stays tight
     assert "item two\n\nAfter the list." in md     # blank line closes the list
     assert "After the list.\n\n| a | b |" in md    # table needs its blank line
+
+
+# --------------------------------------------------------------------------
+# Fence languages across the round trip
+# --------------------------------------------------------------------------
+
+def test_fence_language_is_restored_from_the_local_file():
+    local = "```python\nx = 1\n```\n"
+    pulled = "```\nx = 1\n```\n"
+    assert restore_fence_languages(pulled, local) == local
+
+
+def test_fence_language_is_not_guessed_when_blocks_were_added_remotely():
+    """Position stops identifying the same block, and a mislabelled language
+    is worse than a bare fence."""
+    local = "```python\nx = 1\n```\n"
+    pulled = "```\nnew block\n```\n\n```\nx = 1\n```\n"
+    assert restore_fence_languages(pulled, local) == pulled
+
+
+def test_fence_restoration_retires_the_spurious_merge_conflict():
+    """Why this happens inside render_doc and not on the `pull` path alone.
+
+    Like the equations in test_math, a bare-fence base makes *both* sides
+    differ from it, so a remote edit on the line after a fence stopped the
+    watcher and demanded a hand resolution. Restoring the language before the
+    comparison makes it the ordinary clean merge it always was.
+    """
+    from gdoc_sync.merge import merge3
+
+    local = "```python\nx = 1\n```\n"
+    base_render = "```\nx = 1\n```\n"
+    their_render = "```\nx = 2\n```\n"
+
+    before = merge3(local, base_render, their_render,
+                    label_ours="local", label_base="base", label_theirs="doc")
+    assert before.conflicted
+
+    base = restore_fence_languages(base_render, local)
+    theirs = restore_fence_languages(their_render, local)
+    after = merge3(local, base, theirs,
+                   label_ours="local", label_base="base", label_theirs="doc")
+    assert not after.conflicted
+    assert after.text == "```python\nx = 2\n```\n"

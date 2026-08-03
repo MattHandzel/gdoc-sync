@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .callouts import table_callout
+from .callouts import to_markdown as callout_to_markdown
 from .mathmd import PLACEHOLDER as MATH_PLACEHOLDER
 
 
@@ -107,7 +109,21 @@ def doc_to_markdown(doc: dict, image_saver=None) -> tuple[str, OffsetMapping]:
             if md_parts and not md_parts[-1].endswith("\n\n"):
                 md_parts.append("\n")
                 md_pos += 1
-            table_md = _convert_table(element["table"])
+            # A callout is a one-cell table (see .callouts) holding ordinary
+            # blocks, so it converts by running this same function over the
+            # cell — which is what gets lists, code and nested structure
+            # inside a callout for free.
+            found = table_callout(element["table"])
+            if found is not None:
+                spec, title, cell = found
+                inner, _ = doc_to_markdown(
+                    {"body": {"content": cell.get("content", [])},
+                     "lists": lists_meta, "inlineObjects": inline_objects},
+                    image_saver=image_saver,
+                )
+                table_md = callout_to_markdown(spec, title, inner)
+            else:
+                table_md = _convert_table(element["table"])
             md_parts.append(table_md)
             md_pos += len(table_md)
 

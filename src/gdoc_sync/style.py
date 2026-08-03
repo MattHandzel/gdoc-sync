@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from googleapiclient.errors import HttpError
 
+from .callouts import table_callout
 from .services import NUM_RETRIES
 
 # ---------------------------------------------------------------------------
@@ -468,6 +469,12 @@ def table_border_requests(doc: dict, width_pt: float = 1.0) -> tuple[list[dict],
         table = element.get("table")
         if not table:
             continue
+        # A callout is a table too, and callout_requests gives it an accent
+        # border of its own. Boxing it in plain black as well would undo the
+        # whole look — and since both run in one batch, whichever request came
+        # second would simply win.
+        if table_callout(table) is not None:
+            continue
         start_index = element.get("startIndex")
         rows = table.get("rows", 0)
         cols = table.get("columns", 0)
@@ -499,6 +506,130 @@ def table_border_requests(doc: dict, width_pt: float = 1.0) -> tuple[list[dict],
     return requests, tables
 
 
+def _luminance(hexstr: str) -> float:
+    c = _rgb(hexstr)
+    return 0.2126 * c["red"] + 0.7152 * c["green"] + 0.0722 * c["blue"]
+
+
+def _mix(a: str, b: str, t: float) -> str:
+    """Blend hex colour ``a`` toward ``b`` by fraction ``t``."""
+    ca, cb = _rgb(a), _rgb(b)
+    out = "".join(
+        f"{round(255 * (ca[k] + (cb[k] - ca[k]) * t)):02x}"
+        for k in ("red", "green", "blue")
+    )
+    return f"#{out}"
+
+
+def callout_colors(spec, theme: dict | None) -> tuple[str, str]:
+    """The (accent, background) a callout should use under ``theme``.
+
+    Derived rather than tabulated, so every theme — including a user's own
+    from the config's ``themes:`` section — gets callouts that belong to it
+    without anyone maintaining fourteen colours per theme. The tint is the
+    accent blended most of the way into the page, which keeps body text
+    readable on top of it whatever the page happens to be.
+
+    On a dark page the light-page accents are too dark to read, so they are
+    lifted toward white first and the tint is taken a little stronger — the
+    same reason a dark editor theme uses brighter syntax colours.
+    """
+    page = (theme or {}).get("background") or "#ffffff"
+    accent = spec.accent
+    if _luminance(page) < 0.5:
+        accent = _mix(accent, "#ffffff", 0.45)
+        return accent, _mix(page, accent, 0.18)
+    return accent, _mix(page, accent, 0.12)
+
+
+def callout_requests(doc: dict, theme: dict | None = None) -> tuple[list[dict], int]:
+    """Style every callout table in an already-fetched ``doc``.
+
+    Returns ``(requests, callout_count)``. Each callout gets a tinted cell, a
+    thick accent rule down its left edge, breathing room inside the cell, and
+    its title run in the accent colour — the Obsidian look, expressed in the
+    only vocabulary the Docs API has for it.
+
+    The other three borders are set to zero width rather than left alone:
+    pandoc's imported tables arrive with visible edges, and a full box around
+    a tinted panel reads as a table of one cell instead of a callout.
+    """
+    requests: list[dict] = []
+    count = 0
+    for element in doc.get("body", {}).get("content", []):
+        table = element.get("table")
+        start = element.get("startIndex")
+        if not table or start is None:
+            continue
+        found = table_callout(table)
+        if found is None:
+            continue
+        spec, _title, cell = found
+        accent, tint = callout_colors(spec, theme)
+        count += 1
+
+        edge = {"color": _optional_color(accent),
+                "width": {"magnitude": 3, "unit": "PT"}, "dashStyle": "SOLID"}
+        blank = {"color": _optional_color(tint),
+                 "width": {"magnitude": 0, "unit": "PT"}, "dashStyle": "SOLID"}
+        pad = {"magnitude": 8, "unit": "PT"}
+        requests.append({
+            "updateTableCellStyle": {
+                "tableCellStyle": {
+                    "backgroundColor": _optional_color(tint),
+                    "borderLeft": edge,
+                    "borderTop": blank, "borderBottom": blank, "borderRight": blank,
+                    "paddingLeft": pad, "paddingRight": pad,
+                    "paddingTop": pad, "paddingBottom": pad,
+                },
+                "fields": ("backgroundColor,borderLeft,borderTop,borderBottom,"
+                           "borderRight,paddingLeft,paddingRight,paddingTop,"
+                           "paddingBottom"),
+                "tableRange": {
+                    "tableCellLocation": {
+                        "tableStartLocation": {"index": start},
+                        "rowIndex": 0,
+                        "columnIndex": 0,
+                    },
+                    "rowSpan": 1,
+                    "columnSpan": 1,
+                },
+            }
+        })
+
+        title_range = _callout_title_range(cell)
+        if title_range:
+            requests.append({
+                "updateTextStyle": {
+                    "range": {"startIndex": title_range[0], "endIndex": title_range[1]},
+                    "textStyle": {"bold": True, "foregroundColor": _optional_color(accent)},
+                    "fields": "bold,foregroundColor",
+                }
+            })
+
+    return requests, count
+
+
+def _callout_title_range(cell: dict) -> tuple[int, int] | None:
+    """The index range of the callout's title paragraph, minus its newline."""
+    for element in cell.get("content", []):
+        para = element.get("paragraph")
+        if para is None:
+            return None
+        text = "".join(
+            e.get("textRun", {}).get("content", "") for e in para.get("elements", [])
+        )
+        if not text.strip():
+            continue
+        start = element.get("startIndex")
+        end = element.get("endIndex")
+        if start is None or end is None:
+            return None
+        # The paragraph mark is not part of the run and cannot be styled.
+        return start, max(start + 1, end - 1)
+    return None
+
+
 def apply_document_styling(
     docs_service,
     doc_id: str,
@@ -507,8 +638,9 @@ def apply_document_styling(
     theme: str | None = None,
     baked: bool = False,
     table_width_pt: float = 1.0,
-) -> tuple[bool, int]:
-    """Style the document and border its tables in ONE fetch and ONE batch.
+) -> tuple[bool, int, int]:
+    """Style the document, border its tables and paint its callouts in ONE
+    fetch and ONE batch.
 
     `create` and `push` both need styling and table borders applied to the same
     freshly-uploaded document. Doing that through :func:`apply_styles` and
@@ -522,25 +654,29 @@ def apply_document_styling(
     Ordering within the batch is preserved as well, which is what the font/bold
     interaction in :func:`style_requests` relies on.
 
-    Returns ``(styled, tables_bordered)``.
+    Returns ``(styled, tables_bordered, callouts_painted)``.
     """
     doc = docs_service.documents().get(documentId=doc_id).execute(num_retries=NUM_RETRIES)
     requests = style_requests(doc, font=font, theme=theme, baked=baked)
     border_requests, tables = table_border_requests(doc, table_width_pt)
     requests += border_requests
+    # Callouts last: their accent colour must survive the document-wide text
+    # colour that style_requests paints over every run.
+    callouts, n_callouts = callout_requests(doc, resolve_theme(theme))
+    requests += callouts
 
     if not requests:
-        return False, 0
+        return False, 0, 0
 
     try:
         docs_service.documents().batchUpdate(
             documentId=doc_id, body={"requests": requests}
         ).execute(num_retries=NUM_RETRIES)
-        return True, tables
+        return True, tables, n_callouts
     except HttpError:
         # A batch is all-or-nothing, so one malformed table request would now
         # also cost the document its styling — resilience the two-call version
         # had for free. Fall back to the slow path rather than trade
         # correctness for the round trips.
         styled = apply_styles(docs_service, doc_id, font=font, theme=theme, baked=baked)
-        return styled, apply_table_borders(docs_service, doc_id, table_width_pt)
+        return styled, apply_table_borders(docs_service, doc_id, table_width_pt), 0

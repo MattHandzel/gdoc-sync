@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from .callouts import restore_callout_spellings
 from .comments import embed_comments, fetch_comments
 from .config import atomic_write, set_doc_id
 from .convert import doc_to_markdown, restore_fence_languages
@@ -116,12 +117,18 @@ def render_doc(
     omit it to skip image download entirely.
 
     ``local_text`` supplies the current contents of that file for restoring
-    what the round trip cannot carry — today, the LaTeX behind each equation
-    (see :mod:`.mathmd`). It defaults to reading ``asset_path``. This happens
-    *here* rather than in :func:`pull` on purpose: the sync engine compares
-    ``rendered.markdown`` against its stored ancestor and merges it into the
-    file, so restoring only on the `pull` path would leave every prose edit
-    near an equation surfacing as a conflict on the next watch tick.
+    what the round trip cannot carry: the LaTeX behind each equation (see
+    :mod:`.mathmd`), the ```` ```language ```` tag on each fence (pandoc never
+    writes a fence's info string into the docx), and the exact spelling of
+    each callout marker (see :mod:`.callouts`). It defaults to reading
+    ``asset_path``.
+
+    Both restorations happen *here* rather than in :func:`pull` on purpose.
+    The sync engine compares ``rendered.markdown`` against its stored ancestor
+    and merges it into the file, so restoring only on the `pull` path leaves
+    both sides differing from a base that is missing the formula or the
+    language — and an edit anywhere near one then surfaces as a conflict on
+    the next watch tick rather than as the clean merge it is.
     """
     drive_service, docs_service = get_services()
 
@@ -191,7 +198,8 @@ def _render_body(doc, *, asset_path, local_text, say):
     else:  # no tab metadata at all — legacy top-level body
         markdown, _ = doc_to_markdown(doc, image_saver=image_saver)
 
-    # Put the LaTeX back before anything compares, merges or writes this text.
+    # Put back everything the round trip cannot carry, before anything
+    # compares, merges or writes this text.
     if local_text is None and asset_path is not None and asset_path.exists():
         try:
             local_text = asset_path.read_text(encoding="utf-8")
@@ -203,13 +211,10 @@ def _render_body(doc, *, asset_path, local_text, say):
             say(f"  WARNING: {lost} equation(s) could not be matched to local "
                 f"LaTeX and are marked `[equation]` — the Docs API does not "
                 f"expose equation contents. Check them before saving.")
+        markdown = restore_fence_languages(markdown, local_text)
+        markdown = restore_callout_spellings(markdown, local_text)
 
     return markdown, title, revision_id, len(tabs), images_saved
-
-
-def preserve_code_fences(existing: str, markdown: str) -> str:
-    """Restore ```language tags lost in the Docs round trip (see convert)."""
-    return restore_fence_languages(markdown, existing)
 
 
 def preserve_frontmatter(existing: str, markdown: str) -> str:
@@ -234,12 +239,12 @@ def pull(doc_id: str, output_path: Path | None = None, json_out: bool = False) -
     rendered = render_doc(doc_id, asset_path=output_path, say=say)
     markdown = rendered.markdown
 
-    # Preserve what the round trip cannot carry: the local file's YAML
-    # frontmatter, and the ```language tags pandoc never wrote into the docx.
+    # Math and fence languages were already restored inside render_doc, so
+    # that the sync engine sees them too. Frontmatter is re-attached only
+    # here: it is genuinely absent from the doc, and the merge ancestor should
+    # say so rather than claim the doc carries it.
     if output_path and output_path.exists():
-        existing = output_path.read_text()
-        markdown = preserve_code_fences(existing, markdown)
-        markdown = preserve_frontmatter(existing, markdown)
+        markdown = preserve_frontmatter(output_path.read_text(), markdown)
 
     if output_path:
         # Overwriting the user's file is the one irreversible step here, so it

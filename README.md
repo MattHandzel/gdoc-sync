@@ -255,6 +255,62 @@ your local file, the only copy that still has it. What follows from that:
 - LaTeX pandoc cannot parse (`$m^$`) is reported when you push, and appears in
   the doc as literal text instead of a formula.
 
+## Callouts
+
+`> [!NOTE]` blocks — GitHub calls them alerts, Obsidian calls them callouts —
+become **coloured, titled panels** in the doc: a tinted background, an accent
+rule down the left edge, and an icon beside the title. The look `obsidian.nvim`
+gives you, in a document you can share with someone who has never heard of
+Obsidian.
+
+```markdown
+> [!WARNING] Do not deploy on a Friday
+> Anything can go in here — paragraphs, lists, code, math.
+>
+> - and it stays inside the panel
+> - where it belongs
+```
+
+Every type either tool defines is understood, with all of Obsidian's aliases:
+
+| Renders as | Write any of |
+| --- | --- |
+| ℹ️ Note | `note`, `info` |
+| 📋 Abstract | `abstract`, `summary`, `tldr` |
+| ☑️ Todo | `todo` |
+| 💡 Tip | `tip`, `hint` |
+| ❗ Important | `important` |
+| ✅ Success | `success`, `check`, `done` |
+| ❓ Question | `question`, `help`, `faq` |
+| ⚠️ Warning | `warning`, `attention` |
+| 🛑 Caution | `caution` |
+| ❌ Failure | `failure`, `fail`, `missing` |
+| ⛔ Danger | `danger`, `error` |
+| 🐛 Bug | `bug` |
+| 🧪 Example | `example` |
+| 💬 Quote | `quote`, `cite` |
+
+Details worth knowing:
+
+- **Colours follow your theme.** They are derived from the page rather than
+  tabulated, so a dark theme — or one of your own from `themes:` — gets
+  callouts that belong to it, with the accent lifted enough to stay readable.
+- **Custom titles round trip.** `> [!TIP] Try this first` keeps its title in
+  both directions.
+- **Your spelling is preserved.** `[!INFO]` and `[!NOTE]` render identically,
+  and a fold marker (`[!NOTE]-`) means nothing in a Google Doc — so both are
+  restored from your local file rather than rewritten on every pull.
+- Where GitHub and Obsidian disagree — Obsidian treats `important` as a synonym
+  of `tip`, and `caution` of `warning` — GitHub wins and all five stay distinct.
+- An unrecognised type (`> [!SOMETHINGELSE]`) stays an ordinary blockquote, and
+  a callout inside a code fence stays code.
+
+Under the hood each callout becomes a one-row, one-column table, because that
+is the only structure the Docs API can give an exact *extent* to. Blockquote
+paragraphs arrive indented — but a list inside one arrives with a bullet's own
+indents instead, so anything deciding "where does this callout end?" from
+indentation stops at the first bullet.
+
 ## Limitations (honest ones)
 
 - **New anchored comments can't be created through the API.** Google's Drive
@@ -265,6 +321,11 @@ your local file, the only copy that still has it. What follows from that:
   replies and resolves (which the API supports) attach to the real thread.
 - Push replaces the whole doc body. Comments survive it; suggested-edit
   history doesn't.
+- **A plain `>` blockquote comes back as an ordinary indented paragraph.**
+  Google Docs has no blockquote of its own — pandoc expresses one as indent —
+  so a pull cannot tell it apart from text somebody indented by hand. Callouts
+  are unaffected, being tables, and the content is never lost; only the `>`
+  is.
 - Pull produces straightforward Markdown. Deeply nested formatting isn't
   round-trip-faithful yet, and `diff` compares that lossy representation. The
   sync engine is built around this fact rather than pretending otherwise — see

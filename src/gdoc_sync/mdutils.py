@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+from .callouts import rewrite_for_pandoc, transform_ast
 
 
 def strip_frontmatter(markdown: str) -> str:
@@ -174,6 +177,22 @@ def ensure_table_blank_lines(markdown: str) -> str:
     return "\n".join(out)
 
 
+def _run_pandoc(args: list[str], stdin: str, cwd: str | None) -> subprocess.CompletedProcess:
+    """Run pandoc, turning both ways it can fail into a useful message."""
+    try:
+        proc = subprocess.run(
+            ["pandoc", *args], input=stdin, text=True, capture_output=True, cwd=cwd,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "pandoc not found on PATH. Install it (https://pandoc.org/installing.html) — "
+            "gdoc-sync uses pandoc for high-fidelity markdown → Google Doc conversion."
+        ) from None
+    if proc.returncode != 0:
+        raise RuntimeError(f"pandoc failed (exit {proc.returncode}):\n{proc.stderr}")
+    return proc
+
+
 def pandoc_to_docx(markdown_body: str, output_path: Path,
                    resource_dir: Path | None = None,
                    reference_doc: Path | None = None,
@@ -189,35 +208,30 @@ def pandoc_to_docx(markdown_body: str, output_path: Path,
     (see :mod:`.refdoc`).
     """
     markdown_body = ensure_table_blank_lines(markdown_body)
-    cmd = [
-        "pandoc",
-        "-f", "gfm+yaml_metadata_block",
-        "-t", "docx",
-        "-o", str(output_path),
-    ]
+    markdown_body, n_callouts = rewrite_for_pandoc(markdown_body)
+
+    reader = ["-f", "gfm+yaml_metadata_block"]
+    writer = ["-t", "docx", "-o", str(output_path)]
     if resource_dir is not None:
-        cmd += ["--resource-path", str(resource_dir)]
+        writer += ["--resource-path", str(resource_dir)]
     if reference_doc is not None:
-        cmd += ["--reference-doc", str(reference_doc)]
+        writer += ["--reference-doc", str(reference_doc)]
     # Without this pandoc highlights fenced code with its built-in `pygments`
     # style, which ignores the document theme entirely.
     if highlight_style is not None:
-        cmd += ["--highlight-style", str(highlight_style)]
-    try:
-        proc = subprocess.run(
-            cmd,
-            input=markdown_body,
-            text=True,
-            capture_output=True,
-            cwd=str(resource_dir) if resource_dir else None,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "pandoc not found on PATH. Install it (https://pandoc.org/installing.html) — "
-            "gdoc-sync uses pandoc for high-fidelity markdown → Google Doc conversion."
-        ) from None
-    if proc.returncode != 0:
-        raise RuntimeError(f"pandoc failed (exit {proc.returncode}):\n{proc.stderr}")
+        writer += ["--highlight-style", str(highlight_style)]
+    cwd = str(resource_dir) if resource_dir else None
+
+    if n_callouts:
+        # A callout has to be rebuilt as a table in the AST, because there is
+        # no markdown pandoc's docx writer turns into a coloured box (see
+        # :mod:`.callouts`). Only pay for the second pandoc process when the
+        # document actually contains one.
+        ast = json.loads(_run_pandoc(reader + ["-t", "json"], markdown_body, cwd).stdout)
+        proc = _run_pandoc(["-f", "json"] + writer,
+                           json.dumps(transform_ast(ast)), cwd)
+    else:
+        proc = _run_pandoc(reader + writer, markdown_body, cwd)
 
     # Malformed LaTeX is not an error to pandoc: it warns, writes the formula
     # into the docx as literal text, and exits 0. The doc then shows `$m^$`

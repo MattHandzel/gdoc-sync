@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.8.0 (2026-08-03)
+
+### Callouts become coloured panels
+
+`> [!NOTE]` blocks reached the doc as *prose*. pandoc's reader recognises
+GitHub's five alert types and turns them into a `Div` — and pandoc's docx
+writer then flattens that `Div` completely, so the word "Note" arrived as an
+ordinary paragraph indistinguishable from the text around it. Obsidian-only
+types never got that far: `> [!TLDR]` was not an alert to pandoc at all, and
+arrived as the literal characters `[!TLDR]`. Neither is visible as a mistake
+in the markdown, only in the document you already shared.
+
+They are now panels: a tinted background, an accent rule down the left edge,
+and an icon beside the title.
+
+- **Every type GitHub and Obsidian define**, and all of Obsidian's aliases —
+  25 spellings across 14 rendered kinds. Where the two disagree (Obsidian
+  treats `important` as a synonym of `tip`, `caution` of `warning`) GitHub
+  wins and all five stay distinct.
+- **Colours are derived from the theme**, not tabulated: the tint is the
+  accent blended into the page, and on a dark page the accent is lifted first.
+  A user-defined theme from `themes:` gets callouts that match it without
+  anyone maintaining fourteen colours per theme.
+- **Custom titles** (`> [!TIP] Try this first`) round trip in both directions.
+- **Your own spelling survives a pull.** `[!INFO]` and `[!NOTE]` are the same
+  panel, and a fold marker (`[!NOTE]-`) has no meaning in a Google Doc, so
+  both are restored from the local file rather than rewritten every sync.
+- A callout inside a code fence stays code; `> [!SOMETHINGELSE]` stays an
+  ordinary blockquote.
+
+Each callout is a one-row, one-column table — the only structure the Docs API
+can give an exact *extent* to. Blockquote paragraphs arrive with 24pt indents,
+but a list inside one arrives with a bullet's indents and no end indent at
+all, so anything reading the extent off indentation ends the callout at its
+first bullet. Verified end to end on a document carrying all 14 kinds plus a
+custom title, an alias with a fold marker, a nested list, bold, code and math:
+16 panels rendered, and the pulled markdown came back byte-identical.
+
+### Fence languages now survive a merge, not just a pull
+
+`restore_fence_languages` ran in `pull` only, so ```` ```python ```` was
+restored in the file while the merge ancestor and the doc render both still
+said ```` ``` ````. Both sides then differed from the base on that line, and a
+remote edit next to a fence stopped `watch` with a conflict to resolve by
+hand. It now runs inside `render_doc`, alongside the equation restoration that
+was moved there in 0.7.0 for exactly the same reason — and for the same
+reason, this retires spurious conflicts rather than fixing lost data.
+
 ## 0.7.1 (2026-08-02)
 
 ### Fewer round trips

@@ -95,10 +95,12 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
     # apiece this was four sequential round trips, about a second of the push.
     try:
         baked = reference_doc is not None
-        styled, n = apply_document_styling(
+        styled, n, n_callouts = apply_document_styling(
             docs_service, doc_id, font=font, theme=theme, baked=baked)
         if n:
             print(f"  Applied visible borders to {n} table(s)")
+        if n_callouts:
+            print(f"  Styled {n_callouts} callout(s)")
         if styled:
             where = "in the doc's named styles" if baked else "to the doc's text"
             print(f"  Applied font: {font}" + (f" + theme: {theme}" if theme else "")
