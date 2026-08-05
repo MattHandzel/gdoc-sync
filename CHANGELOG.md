@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.9.0 (2026-08-05)
+
+### Start from a doc you didn't write
+
+Every path into gdoc-sync assumed the Markdown existed first. `create` makes a
+doc from a file; `push` and `pull` move a link that already exists. The case
+that had no answer was the common one — somebody shares a doc with you and you
+want it in your notes.
+
+`pull <url> <file>` came closest, but it made you invent the filename and left
+the result with no record of where the text came from.
+
+```bash
+gdoc-sync import https://docs.google.com/document/d/<id>/edit --dest ~/notes
+```
+
+- **Named after the document.** `Matt x Tzu 🌻 1-1 advisory` becomes
+  `matt-x-tzu-1-1-advisory.md`. Emoji, accents and punctuation are reduced to
+  something you can type and wiki-link; `-o FILE` if you'd rather choose.
+- **Provenance in frontmatter** — `title`, `source`, `gdoc_id`, `imported` —
+  written through the YAML dumper, so a title full of colons and quotes still
+  produces a header that parses. `pull` already preserves frontmatter, so it
+  survives every later sync. `--no-frontmatter` opts out.
+- **Linked and reconciled on arrival.** The mapping *and* the merge ancestors
+  are registered, so the first `sync`/`watch` tick sees an up-to-date file
+  rather than a file it has no history for and has to ask about.
+- **`--dest DIR`**, or set `import_dir:` in the config to send every import to
+  one notes folder.
+- Refuses to overwrite an existing file, and says how to link that file
+  instead. `--force` to overwrite anyway.
+
+### Tabbed docs are no longer silently flattened
+
+`pull` reads every tab; `push` writes a single body. Pushing a pulled tabbed
+doc therefore moved the whole flattened document — `# [TAB]` headers and all —
+into the *first* tab and deleted the others. The advice was "don't round-trip a
+multi-tab doc", which `watch --all` cannot follow on your behalf.
+
+Files can now be marked **pull-only**, and `import` marks a multi-tab doc that
+way automatically:
+
+- `sync` and `watch` honour the mark per file: doc edits come down, local edits
+  are never pushed up. `watch`'s start banner counts them.
+- `--adopt-local` on a pull-only file is refused rather than reinterpreted —
+  it asks for exactly the push the mark prevents, and silently adopting
+  *remote* instead would overwrite the local file.
+- `status` labels them; `gdoc-sync link <file> <url> --pull-only` / `--two-way`
+  sets and clears the mark; `unlink` clears it.
+
 ## 0.8.0 (2026-08-03)
 
 ### Callouts become coloured panels

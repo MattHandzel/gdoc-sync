@@ -50,6 +50,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-mapping", action="store_true", help="do not save the local→doc mapping")
     p.add_argument("--open", action="store_true", help="open the created doc in the browser")
 
+    p = sub.add_parser("import", help="create a new markdown file from an existing Google Doc")
+    p.add_argument("url", help="Google Doc URL or ID")
+    p.add_argument("-o", "--output", metavar="FILE",
+                   help="write here (default: <doc-title-slug>.md inside --dest)")
+    p.add_argument("--dest", metavar="DIR",
+                   help="directory for the derived filename (default: config import_dir, else cwd)")
+    p.add_argument("--force", action="store_true", help="overwrite an existing file")
+    p.add_argument("--no-frontmatter", action="store_true",
+                   help="do not add the title/source/imported YAML header")
+    oneway = p.add_mutually_exclusive_group()
+    oneway.add_argument("--pull-only", action="store_true",
+                        help="never push local edits back (default for tabbed docs)")
+    oneway.add_argument("--two-way", action="store_true",
+                        help="allow pushes even for a tabbed doc (flattens its tabs)")
+    p.add_argument("--open", action="store_true", help="open the doc in the browser")
+
     p = sub.add_parser("push", help="push local markdown to its linked Google Doc")
     p.add_argument("file", type=_existing_file)
     p.add_argument("--yes", "-y", action="store_true",
@@ -126,6 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("link", help="link a local file to an existing Google Doc")
     p.add_argument("file", type=_existing_file)
     p.add_argument("url", help="Google Doc URL or ID")
+    oneway = p.add_mutually_exclusive_group()
+    oneway.add_argument("--pull-only", action="store_true",
+                        help="sync brings doc edits down but never pushes local edits up")
+    oneway.add_argument("--two-way", action="store_true",
+                        help="clear a previous --pull-only mark")
 
     p = sub.add_parser("unlink", help="remove a file's local→doc mapping (doc is untouched)")
     p.add_argument("file", type=_existing_file)
@@ -184,6 +205,24 @@ def _dispatch(args: argparse.Namespace) -> None:
             save_mapping=not args.no_mapping,
             open_in_browser=args.open,
         ))
+
+    elif args.command == "import":
+        from .config import get_import_dir
+        from .importer import import_doc
+        dest = Path(args.dest).expanduser() if args.dest else get_import_dir()
+        output = Path(args.output).expanduser() if args.output else None
+        pull_only = True if args.pull_only else (False if args.two_way else None)
+
+        def run_import():
+            try:
+                import_doc(args.url, output=output, dest=dest, force=args.force,
+                           pull_only=pull_only, frontmatter=not args.no_frontmatter,
+                           open_in_browser=args.open)
+            except FileExistsError as e:
+                print(e, file=sys.stderr)
+                sys.exit(1)
+
+        _api_guard(run_import)
 
     elif args.command == "push":
         from .push import push
@@ -253,10 +292,13 @@ def _dispatch(args: argparse.Namespace) -> None:
         unlink(args.file)
 
     elif args.command == "link":
-        from .config import extract_doc_id_from_url, set_doc_id
+        from .config import extract_doc_id_from_url, set_doc_id, set_pull_only
         doc_id = extract_doc_id_from_url(args.url)
         set_doc_id(str(args.file), doc_id)
-        print(f"Linked {args.file} → {doc_id}")
+        if args.pull_only or args.two_way:
+            set_pull_only(str(args.file), args.pull_only)
+        suffix = " (pull-only)" if args.pull_only else ""
+        print(f"Linked {args.file} → {doc_id}{suffix}")
 
     elif args.command == "status":
         from .status import status
@@ -295,7 +337,7 @@ def _run_sync(files, *, adopt, no_push, force, json_lines) -> None:
     """One reconcile pass over ``files``; exits non-zero if any conflicted."""
     import json as _json
 
-    from .config import get_doc_id, set_revision
+    from .config import get_doc_id, is_pull_only, set_revision
     from .pull import render_doc
     from .push import push as push_file
     from .sync import reconcile
@@ -307,11 +349,22 @@ def _run_sync(files, *, adopt, no_push, force, json_lines) -> None:
             print(f"Skipping {path}: not linked to a Google Doc", file=sys.stderr)
             continue
 
+        # `--adopt-local` on a one-way file is a contradiction: it asks for the
+        # exact push the mark exists to prevent. Refuse it rather than guessing
+        # — silently adopting *remote* instead would overwrite the local file,
+        # which is the opposite of what was asked for.
+        one_way = is_pull_only(str(path))
+        if one_way and adopt == "local":
+            print(f"Skipping {path}: marked pull-only, so --adopt-local would "
+                  f"push it. Run `gdoc-sync link {path} {doc_id} --two-way` first "
+                  f"if that is really what you want.", file=sys.stderr)
+            continue
+
         outcome = reconcile(
             path, doc_id,
             render=lambda p, _d=doc_id: render_doc(_d, asset_path=p),
             push=lambda p: push_file(p, yes=True, merged=True),
-            allow_push=not no_push,
+            allow_push=not (no_push or one_way),
             adopt=adopt,
             force=force,
             say=(lambda *a: None) if json_lines else print,

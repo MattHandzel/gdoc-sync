@@ -147,6 +147,19 @@ def get_watch_interval() -> int:
     return max(value, MIN_WATCH_INTERVAL)
 
 
+def get_import_dir() -> Path | None:
+    """Default directory for `import`-derived filenames.
+
+    ``None`` means the current working directory, which keeps `import` behaving
+    like every other CLI that writes a file where you are standing. Set
+    ``import_dir:`` in the config to send imports to one notes folder instead.
+    """
+    raw = _setting("import_dir", None)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(raw).expanduser()
+
+
 def get_custom_themes() -> dict:
     """User-defined themes from the config's ``themes:`` section."""
     themes = load_config().get("themes")
@@ -261,6 +274,8 @@ def remove_mapping(local_path: str | os.PathLike) -> bool:
     resolved = str(Path(local_path).resolve())
     removed = state.get("mappings", {}).pop(resolved, None) is not None
     state.get("revisions", {}).pop(resolved, None)
+    if resolved in state.get("pull_only", []):
+        state["pull_only"].remove(resolved)
     if removed:
         save_state(state)
     return removed
@@ -269,6 +284,33 @@ def remove_mapping(local_path: str | os.PathLike) -> bool:
 def all_mappings() -> dict[str, str]:
     """All local-file → doc-id mappings."""
     return dict(load_state().get("mappings", {}))
+
+
+def is_pull_only(local_path: str | os.PathLike) -> bool:
+    """Whether this file is marked one-way (doc → markdown, never the reverse).
+
+    Some docs cannot survive a round trip. A tabbed doc is the clear case:
+    :func:`~gdoc_sync.pull.pull` flattens every tab into one markdown file with
+    ``# [TAB]`` headers, but a push writes the whole flattened text back into
+    the *first* tab — so an automatic push would silently destroy the document's
+    tab structure. Marking such a file pull-only lets it take part in `sync
+    --all` and `watch --all` without that risk.
+    """
+    return str(Path(local_path).resolve()) in load_state().get("pull_only", [])
+
+
+def set_pull_only(local_path: str | os.PathLike, enabled: bool = True) -> None:
+    """Mark (or unmark) a file as one-way. Idempotent."""
+    state = load_state()
+    resolved = str(Path(local_path).resolve())
+    marked = state.setdefault("pull_only", [])
+    if enabled and resolved not in marked:
+        marked.append(resolved)
+    elif not enabled and resolved in marked:
+        marked.remove(resolved)
+    else:
+        return
+    save_state(state)
 
 
 # ---------------------------------------------------------------------------

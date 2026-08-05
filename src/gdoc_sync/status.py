@@ -5,7 +5,7 @@ from __future__ import annotations
 import json as jsonlib
 from pathlib import Path
 
-from .config import all_mappings, config_path, get_revision, state_path
+from .config import all_mappings, config_path, get_revision, is_pull_only, state_path
 
 
 def status(*, remote: bool = False, json_out: bool = False) -> None:
@@ -22,6 +22,7 @@ def status(*, remote: bool = False, json_out: bool = False) -> None:
             "doc_id": doc_id,
             "exists": Path(local).exists(),
             "remote": "unchecked",
+            "pull_only": is_pull_only(local),
         }
         if docs_service is not None:
             stored = get_revision(local)
@@ -57,6 +58,8 @@ def status(*, remote: bool = False, json_out: bool = False) -> None:
         marks = []
         if not row["exists"]:
             marks.append("MISSING LOCALLY")
+        if row["pull_only"]:
+            marks.append("pull-only")
         if row["remote"] not in ("unchecked", "in-sync"):
             marks.append(row["remote"])
         elif row["remote"] == "in-sync":

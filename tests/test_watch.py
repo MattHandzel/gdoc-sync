@@ -72,7 +72,7 @@ def test_uneventful_ticks_stay_silent(capsys, action, monkeypatch):
     would show a notification for a file nobody touched."""
     monkeypatch.setattr(watch, "reconcile",
                         lambda *a, **k: SyncOutcome(action, "nothing happened"))
-    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0}
+    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
     watch._tick(Path("/tmp/note.md"), t, None, False, False, True,
                 lambda p: None, lambda p: None)
     assert capsys.readouterr().out == ""
@@ -82,7 +82,7 @@ def test_uneventful_ticks_stay_silent(capsys, action, monkeypatch):
 def test_real_events_are_reported(capsys, action, monkeypatch):
     monkeypatch.setattr(watch, "reconcile",
                         lambda *a, **k: SyncOutcome(action, "something happened"))
-    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0}
+    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
     watch._tick(Path("/tmp/note.md"), t, None, False, False, True,
                 lambda p: None, lambda p: None)
     assert json.loads(capsys.readouterr().out.strip())["event"] == action
@@ -94,12 +94,36 @@ def test_tick_records_a_new_revision(monkeypatch, tmp_path):
         lambda *a, **k: SyncOutcome(NOOP, "", revision="rev-99"))
     path = tmp_path / "note.md"
     path.write_text("x")
-    t = {"doc_id": "d", "rev": "rev-1", "fails": 0, "skip": 0}
+    t = {"doc_id": "d", "rev": "rev-1", "fails": 0, "skip": 0, "one_way": False}
 
     watch._tick(path, t, None, False, False, True, lambda p: None, lambda p: None)
 
     assert t["rev"] == "rev-99"
     assert config.get_revision(str(path)) == "rev-99"
+
+
+@pytest.mark.parametrize("one_way,no_push,expected", [
+    (False, False, True),   # ordinary two-way file
+    (True, False, False),   # the file's own mark forbids pushing
+    (False, True, False),   # --no-push forbids pushing
+    (True, True, False),
+])
+def test_pull_only_file_is_never_pushed(monkeypatch, tmp_path, one_way, no_push, expected):
+    """A tabbed doc is imported pull-only; a push would flatten its tabs away."""
+    seen = {}
+
+    def capture(*a, **k):
+        seen["allow_push"] = k["allow_push"]
+        return SyncOutcome(NOOP, "")
+
+    monkeypatch.setattr(watch, "reconcile", capture)
+    path = tmp_path / "note.md"
+    path.write_text("x")
+    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": one_way}
+
+    watch._tick(path, t, None, no_push, False, True, lambda p: None, lambda p: None)
+
+    assert seen["allow_push"] is expected
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +135,7 @@ def test_an_exception_does_not_kill_the_watcher(capsys, monkeypatch):
         raise RuntimeError("network gone")
 
     monkeypatch.setattr(watch, "reconcile", boom)
-    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0}
+    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
 
     watch._safe_tick(Path("/tmp/note.md"), t, None, False, False, True,
                      lambda p: None, lambda p: None)
@@ -128,7 +152,7 @@ def test_systemexit_from_push_is_caught(capsys, monkeypatch):
         raise SystemExit(2)
 
     monkeypatch.setattr(watch, "reconcile", bail)
-    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0}
+    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
     watch._safe_tick(Path("/tmp/note.md"), t, None, False, False, True,
                      lambda p: None, lambda p: None)
     assert json.loads(capsys.readouterr().out.strip())["event"] == "error"
@@ -137,7 +161,7 @@ def test_systemexit_from_push_is_caught(capsys, monkeypatch):
 def test_repeated_failures_back_off(capsys, monkeypatch):
     monkeypatch.setattr(watch, "reconcile",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope")))
-    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0}
+    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
 
     for _ in range(5):
         watch._safe_tick(Path("/tmp/note.md"), t, None, False, False, True,
@@ -158,7 +182,7 @@ def test_a_success_clears_the_backoff(monkeypatch):
         return SyncOutcome(NOOP, "")
 
     monkeypatch.setattr(watch, "reconcile", flaky)
-    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0}
+    t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
     for _ in range(3):
         watch._safe_tick(Path("/tmp/note.md"), t, None, False, False, True,
                          lambda p: None, lambda p: None)

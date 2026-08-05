@@ -221,8 +221,10 @@ def _reconcile(
 
     if local_changed and not remote_changed:
         if not allow_push:
-            outcome.notes.append("local change not pushed (--no-push)")
-            return SyncOutcome(SKIPPED, "local change held back (--no-push)",
+            # Pushing is off either because the caller passed --no-push or
+            # because this file is marked pull-only; the engine is not told
+            # which, so the message names neither rather than guessing wrong.
+            return SyncOutcome(SKIPPED, "local change held back (pushing disabled)",
                                notes=outcome.notes)
         guard = _empty_guard(local, bases.local, force)
         if guard:

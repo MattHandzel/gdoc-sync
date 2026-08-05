@@ -11,6 +11,7 @@ document both ways, including the comments, so nobody has to switch tools.
 gdoc-sync create draft.md   # new Google Doc: styled, shared, URL on your clipboard
 gdoc-sync push  draft.md    # local edits go to the same doc (URL and sharing survive)
 gdoc-sync pull  draft.md    # doc edits and reviewer comments come back into your Markdown
+gdoc-sync import <url>      # start from someone else's doc: new Markdown file, already linked
 ```
 
 Here's what a pushed doc looks like (the default `professional` theme):
@@ -67,6 +68,14 @@ gdoc-sync doctor           # confirms everything is wired up
   copied to your clipboard, and the doc is shared anyone-with-link-can-comment
   by default (`--edit`, `--view`, `--private`, `--share-with alice@x.com:edit`
   to change it).
+- **import** goes the other way round from `create`: give it a doc URL and it
+  writes a *new* Markdown file, named after the document
+  (`Q3 Plan: goals` → `q3-plan-goals.md`), with YAML frontmatter recording the
+  title, source URL and doc id. The file is linked and its merge ancestors are
+  registered, so `sync`/`watch` adopt it immediately with nothing to resolve.
+  `--dest DIR` (or `import_dir:` in the config) picks the folder, `-o FILE`
+  names it yourself, `--no-frontmatter` skips the header. A tabbed doc is
+  imported **pull-only** — see [Limitations](#limitations-honest-ones).
 - **push** replaces the linked doc's content in place. The doc id, URL, and
   sharing are untouched. If someone edited the doc since your last pull, you
   get warned before overwriting (`--yes` for scripts). Reply, resolve, and
@@ -321,6 +330,14 @@ indentation stops at the first bullet.
   replies and resolves (which the API supports) attach to the real thread.
 - Push replaces the whole doc body. Comments survive it; suggested-edit
   history doesn't.
+- **A tabbed doc can only be synced one way.** `pull` reads every tab and
+  flattens them into one file with `# [TAB]` headers, but `push` writes a
+  single body — so pushing that file back would move all of it into the *first*
+  tab and delete the rest. Rather than let an automatic `watch` do that,
+  `import` marks a multi-tab doc **pull-only**: `sync` and `watch` bring doc
+  edits down and never push local edits up, and `status` labels it. Use
+  `gdoc-sync link <file> <url> --two-way` to lift the mark (and lose the tabs),
+  or `--pull-only` to set it on any file.
 - **A plain `>` blockquote comes back as an ordinary indented paragraph.**
   Google Docs has no blockquote of its own — pandoc expresses one as indent —
   so a pull cannot tell it apart from text somebody indented by hand. Callouts

@@ -19,7 +19,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import get_doc_id, get_revision, set_revision
+from .config import get_doc_id, get_revision, is_pull_only, set_revision
 from .services import NUM_RETRIES, get_services
 from .sync import BLOCKED, NOOP, SKIPPED, reconcile
 from .syncstate import get_conflict
@@ -100,6 +100,9 @@ def watch(
             "rev": get_revision(str(p)) or "",
             "fails": 0,
             "skip": 0,
+            # Read once here rather than per tick: a long-running watcher should
+            # not change what it is allowed to do to a file halfway through.
+            "one_way": is_pull_only(str(p)),
         }
         conflict = get_conflict(p)
         if conflict:
@@ -113,9 +116,12 @@ def watch(
         sys.exit(1)
 
     mode = "pull-only" if no_push else "two-way"
+    one_way = sum(1 for t in tracked.values() if t["one_way"])
+    note = f", {one_way} of them pull-only" if one_way and not no_push else ""
     _emit(json_lines, "start", Path("."),
-          f"watching {len(tracked)} file(s) every {interval}s ({mode})",
-          files=[str(p) for p in tracked], interval=interval, mode=mode)
+          f"watching {len(tracked)} file(s) every {interval}s ({mode}{note})",
+          files=[str(p) for p in tracked], interval=interval, mode=mode,
+          pull_only=one_way)
 
     def _stop(_signum, _frame):
         raise _Stopped
@@ -175,7 +181,7 @@ def _tick(p, t, docs_service, no_push, force, json_lines, render_for, push_for) 
         t["doc_id"],
         render=render_for,
         push=push_for,
-        allow_push=not no_push,
+        allow_push=not (no_push or t["one_way"]),
         force=force,
         stored_revision=t["rev"],
         peek_revision=lambda: _peek_revision(docs_service, t["doc_id"]),
