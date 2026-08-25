@@ -160,6 +160,20 @@ def get_import_dir() -> Path | None:
     return Path(raw).expanduser()
 
 
+def get_image_dir() -> Path | None:
+    """Directory where images added in a Google Doc are downloaded.
+
+    ``None`` (the default) keeps them beside each markdown file in
+    ``<stem>-assets/``. Set ``image_dir:`` in the config to collect every
+    downloaded image in one global folder instead; links written into the
+    markdown stay relative to the markdown file either way.
+    """
+    raw = _setting("image_dir", None)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(raw).expanduser()
+
+
 def get_custom_themes() -> dict:
     """User-defined themes from the config's ``themes:`` section."""
     themes = load_config().get("themes")

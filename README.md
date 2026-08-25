@@ -83,8 +83,11 @@ gdoc-sync doctor           # confirms everything is wired up
   below).
 - **pull** brings the doc back as clean Markdown, including multi-tab
   documents, with every unresolved comment embedded as `{>>Author: text<<}`
-  right after the text it anchors to. Images download to `<name>-assets/`.
-  Your local YAML frontmatter is preserved. `--json` for scripts.
+  right after the text it anchors to. Images download to `<name>-assets/`
+  (or one global `image_dir:` from the config), and an image the file already
+  references keeps its own path and alt text — pulls recognise your images by
+  content, so they are never re-downloaded or renamed. Your local YAML
+  frontmatter is preserved. `--json` for scripts.
 - **sync** reconciles a file with its doc once: a real three-way merge, so
   edits made on both sides both survive (see [Two-way sync](#two-way-sync)).
 - **watch** is that same reconcile on a timer — live two-way sync. `--json`
@@ -184,6 +187,10 @@ defaults:
   clipboard: true
   conflict_style: markers   # markers (git-style, in the file) | sidecar
   watch_interval: 15        # seconds between polls for `watch`
+
+# Optional: collect images added in Google Docs into one folder instead of
+# `<name>-assets/` beside each file. Links in the markdown stay relative.
+# image_dir: ~/notes/attachments/gdocs
 
 # Only needed if the auto-detected clipboard tool is wrong for your setup.
 # gdoc-sync already picks wl-copy / xclip / xsel / pbcopy / clip.exe (WSL) /

@@ -16,14 +16,6 @@ from .mathmd import restore_math
 from .services import NUM_RETRIES, get_services
 from .syncstate import backup_file, clear_conflict, set_bases
 
-_IMAGE_EXTS = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/gif": ".gif",
-    "image/svg+xml": ".svg",
-    "image/webp": ".webp",
-}
-
 
 def _iter_tabs(tabs, depth=0):
     """Yield (title, documentTab, depth) for every tab, recursing childTabs.
@@ -46,44 +38,6 @@ def _tab_to_markdown(doc_tab: dict, image_saver=None) -> str:
                              "inlineObjects": doc_tab.get("inlineObjects", {})},
                             image_saver=image_saver)
     return md
-
-
-def _make_image_saver(output_path: Path):
-    """Build a saver that downloads inline images into ``<output>-assets/``.
-
-    Returns (save_fn, count_fn). contentUri links are short-lived and need an
-    authorized request, hence the AuthorizedSession.
-    """
-    from google.auth.transport.requests import AuthorizedSession
-
-    from .auth import get_credentials
-
-    session = AuthorizedSession(get_credentials())
-    assets_dir = output_path.parent / f"{output_path.stem}-assets"
-    saved: dict[str, str] = {}
-    counter = 0
-
-    def save(object_id: str, content_uri: str) -> str | None:
-        nonlocal counter
-        if object_id in saved:
-            return saved[object_id]
-        try:
-            resp = session.get(content_uri, timeout=30)
-            if resp.status_code != 200:
-                return None
-            ctype = resp.headers.get("content-type", "").split(";")[0].strip()
-            ext = _IMAGE_EXTS.get(ctype, ".png")
-            counter += 1
-            assets_dir.mkdir(parents=True, exist_ok=True)
-            fname = f"img-{counter:03d}{ext}"
-            (assets_dir / fname).write_bytes(resp.content)
-            rel = f"{assets_dir.name}/{fname}"
-            saved[object_id] = rel
-            return rel
-        except Exception:
-            return None
-
-    return save, (lambda: counter)
 
 
 @dataclass
@@ -180,7 +134,11 @@ def _render_body(doc, *, asset_path, local_text, say):
 
     image_saver, images_saved = None, (lambda: 0)
     if asset_path is not None:
-        image_saver, images_saved = _make_image_saver(asset_path)
+        from .config import get_image_dir
+        from .images import ImageResolver
+        image_saver = ImageResolver(asset_path, local_text=local_text,
+                                    image_dir=get_image_dir())
+        images_saved = image_saver.count
 
     tabs = list(_iter_tabs(doc.get("tabs", [])))
     say(f"Pulling: {title}" + (f"  ({len(tabs)} tabs)" if len(tabs) > 1 else ""))
@@ -213,6 +171,9 @@ def _render_body(doc, *, asset_path, local_text, say):
                 f"expose equation contents. Check them before saving.")
         markdown = restore_fence_languages(markdown, local_text)
         markdown = restore_callout_spellings(markdown, local_text)
+
+    if image_saver is not None:
+        image_saver.finish()
 
     return markdown, title, revision_id, len(tabs), images_saved
 

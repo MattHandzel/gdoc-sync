@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Images sync both ways now
+
+Add an image in the Google Doc and the next `pull`/`sync`/`watch` downloads
+it beside your file (`<name>-assets/`, or one global `image_dir:` from the
+config) and writes the link into your Markdown. Images your file already
+references are recognised **by content**: after every push recreates the
+doc's image objects, each one hashes back to the file it came from, keeps
+its path and alt text, and is never re-downloaded or renamed.
+
+This also fixes a churn bug: the sync baseline used to be recorded without
+image links while every later render had them, so any doc with images
+reported a remote edit that never happened — and merges could duplicate
+image references. Baselines now render through the same image resolver as
+every other render.
+
 ## 0.9.0 (2026-08-05)
 
 ### Start from a doc you didn't write

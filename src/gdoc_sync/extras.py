@@ -65,8 +65,9 @@ def diff(local_path: Path) -> None:
     ).execute(num_retries=NUM_RETRIES)
 
     # Images aren't downloaded for a diff; a placeholder keeps the sides
-    # comparable (both collapse to ![image] in _normalize_for_diff).
-    placeholder = lambda object_id, uri: "image"  # noqa: E731
+    # comparable (both collapse to ![image] in _normalize_for_diff). The
+    # saver contract returns a full markdown token.
+    placeholder = lambda object_id, uri: "![image](image)"  # noqa: E731
 
     tabs = list(_iter_tabs(doc.get("tabs", [])))
     if tabs:

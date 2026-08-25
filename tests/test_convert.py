@@ -92,7 +92,7 @@ def test_inline_image_uses_saver():
 
     def saver(object_id, uri):
         seen[object_id] = uri
-        return "doc-assets/img-001.png"
+        return "![image](doc-assets/img-001.png)"
 
     md, _ = doc_to_markdown(doc, image_saver=saver)
     assert "![image](doc-assets/img-001.png)" in md

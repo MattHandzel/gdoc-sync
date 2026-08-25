@@ -303,8 +303,14 @@ def record_sync_baseline(path: Path, doc_id: str, local_text: str | None = None)
         # ``local_text`` is what lets the baseline carry the file's LaTeX. Skip
         # it and the ancestor holds `[equation]` placeholders while every later
         # render holds the real math, so the first tick reports a remote edit
-        # that never happened.
-        rendered = render_doc(doc_id, asset_path=None, local_text=local)
+        # that never happened. ``asset_path`` matters for the same reason:
+        # without it images render as nothing here but as ![alt](path) on
+        # every later render, and each image line becomes a phantom remote
+        # edit. The image resolver maps the doc's objects back to the paths
+        # this file already references, so recording a baseline right after a
+        # push fetches each new object once to hash it, writes no new files,
+        # and leaves the index warm for every later watch tick.
+        rendered = render_doc(doc_id, asset_path=path, local_text=local)
         set_bases(path, local=local, remote=rendered.markdown)
         clear_conflict(path)
         return True

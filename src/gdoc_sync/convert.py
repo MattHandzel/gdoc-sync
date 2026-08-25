@@ -265,9 +265,13 @@ def _convert_paragraph_elements(
                     .get("contentUri")
                 )
                 if uri:
+                    # The saver returns a complete markdown token — for a
+                    # known image that is the *local file's own* ``![alt](path)``
+                    # so renders agree with the file byte-for-byte (see
+                    # :mod:`.images`).
                     saved = image_saver(obj_id, uri)
                     if saved:
-                        md_parts.append(f"![image]({saved})")
+                        md_parts.append(saved)
             continue
 
         content = text_run.get("content", "")
