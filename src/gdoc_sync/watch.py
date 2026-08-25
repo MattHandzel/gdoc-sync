@@ -13,6 +13,7 @@ resolves it. Nothing here decides which side wins.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import signal
 import sys
@@ -87,7 +88,18 @@ def watch(
         # The engine only pushes content it has already merged, so the CLI's
         # interactive overwrite prompt would be asking a question that has
         # been answered — and there is no tty here to answer it.
-        push_file(path, yes=True, merged=True)
+        #
+        # push() narrates its progress ("Pushing to: …", "Converting markdown
+        # → docx via pandoc...", "  Pushed successfully.") on stdout. Under
+        # --json that stdout is a machine stream, and those four lines are not
+        # events, so send them to stderr instead: consumers get a clean
+        # one-JSON-object-per-line stdout and the narration is still there for
+        # anyone watching the log.
+        if json_lines:
+            with contextlib.redirect_stdout(sys.stderr):
+                push_file(path, yes=True, merged=True)
+        else:
+            push_file(path, yes=True, merged=True)
 
     tracked: dict[Path, dict] = {}
     for p in paths:
