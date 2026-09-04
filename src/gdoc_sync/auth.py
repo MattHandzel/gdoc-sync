@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from google.auth.exceptions import RefreshError
@@ -140,7 +141,19 @@ def get_credentials(interactive: bool = True) -> Credentials:
 def run_auth(client: str | None = None, force: bool = False) -> None:
     """The ``gdoc-sync auth`` command."""
     if client:
-        dest = install_client_secret(Path(client).expanduser())
+        # Validate before anything else: a typo'd --client used to copy-fail
+        # (or worse, fall through) only after the browser consent flow had
+        # already started.
+        source = Path(client).expanduser()
+        if not source.exists():
+            print(f"OAuth client file not found: {source}\n"
+                  f"Download the client JSON for a Desktop-app OAuth client:\n"
+                  f"  {CREATE_CLIENT_URL}", file=sys.stderr)
+            sys.exit(2)
+        if not source.is_file():
+            print(f"Not a file: {source}", file=sys.stderr)
+            sys.exit(2)
+        dest = install_client_secret(source)
         print(f"Installed client secret at {dest}")
     if force and token_path().exists():
         token_path().unlink()

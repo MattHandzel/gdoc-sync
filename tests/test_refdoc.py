@@ -163,8 +163,17 @@ def test_no_styling_requested_returns_none():
     assert refdoc.build_reference_docx(None, None) is None
 
 
-def test_styled_reference_docx_survives_a_bad_theme_name():
-    assert refdoc.styled_reference_docx("Garamond", "no-such-theme") is not None
+def test_styled_reference_docx_rejects_a_bad_theme_name():
+    """A typo'd theme used to fall through to an unthemed (silently plain) doc."""
+    from gdoc_sync.style import UnknownThemeError
+
+    with pytest.raises(UnknownThemeError, match="no-such-theme"):
+        refdoc.styled_reference_docx("Garamond", "no-such-theme")
+
+
+def test_styled_reference_docx_without_a_theme_is_font_only():
+    assert refdoc.styled_reference_docx("Garamond", None) is not None
+    assert refdoc.styled_reference_docx("Garamond", "none") is not None
 
 
 def test_clear_cache_removes_built_docs():

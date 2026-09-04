@@ -169,7 +169,7 @@ def test_default_theme_is_professional(tmp_path, monkeypatch):
 
 def test_custom_theme_from_config(tmp_path, monkeypatch):
     import gdoc_sync.config as config
-    from gdoc_sync.style import available_themes, resolve_theme
+    from gdoc_sync.style import UnknownThemeError, available_themes, resolve_theme
 
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
@@ -189,10 +189,15 @@ def test_custom_theme_from_config(tmp_path, monkeypatch):
     assert palette["headings"]["HEADING_1"] == "#0033aa"
     assert palette["headings"]["HEADING_6"] == "#0033aa"
     assert palette["background"] == "#ffffff"  # sensible fill-ins
-    # built-ins still resolve, unknown names don't
+    # built-ins still resolve; unknown names are an error, not a silent None
+    # (returning None here produced an unstyled doc and said nothing)
     assert resolve_theme("professional")["pageless"] is False
     assert resolve_theme("catppuccin-latte") is not None
-    assert resolve_theme("nope") is None
+    with pytest.raises(UnknownThemeError, match="nope"):
+        resolve_theme("nope")
+    # "no theme" spellings stay valid
+    assert resolve_theme(None) is None
+    assert resolve_theme("none") is None
 
 
 def test_custom_theme_heading_shapes():

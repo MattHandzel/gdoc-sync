@@ -186,15 +186,53 @@ def available_themes() -> list[str]:
     return list(THEMES) + [t for t in get_custom_themes() if t not in THEMES]
 
 
+# Spellings that mean "do not theme this document".
+THEME_OFF = ("none", "off", "false")
+
+
+class UnknownThemeError(ValueError):
+    """A theme name that is neither built in nor defined in the config."""
+
+
+def _unknown_theme(name: str, detail: str) -> UnknownThemeError:
+    return UnknownThemeError(
+        f"Unknown theme {name!r} — {detail}\n"
+        f"Available themes: {', '.join(available_themes())}, none"
+    )
+
+
+def check_theme(name: str | None) -> None:
+    """Raise :class:`UnknownThemeError` unless ``name`` names a real theme.
+
+    ``None`` and the "off" spellings are valid: they mean no theming.
+    """
+    resolve_theme(name)
+
+
 def resolve_theme(name: str | None) -> dict | None:
-    """A palette for ``name``: user-defined config themes first, then built-ins."""
+    """A palette for ``name``: user-defined config themes first, then built-ins.
+
+    An unrecognised name raises instead of returning ``None``. Returning None
+    made a typo'd ``--theme`` (or ``theme:`` in the config) produce a
+    successfully-created but completely unstyled document, with nothing said.
+    """
     if not name:
         return None
+    if name.strip().lower() in THEME_OFF:
+        return None
     from .config import get_custom_themes
-    raw = get_custom_themes().get(name)
-    if isinstance(raw, dict):
+    custom = get_custom_themes()
+    if name in custom:
+        raw = custom[name]
+        if not isinstance(raw, dict):
+            raise _unknown_theme(
+                name, "the `themes:` entry in your config is not a mapping of "
+                      "colors.")
         return _normalize_theme(raw)
-    return THEMES.get(name)
+    palette = THEMES.get(name)
+    if palette is None:
+        raise _unknown_theme(name, "no such built-in or config-defined theme.")
+    return palette
 
 
 def _rgb(hexstr: str) -> dict:

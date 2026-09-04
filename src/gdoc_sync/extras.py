@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import re
 import sys
 import webbrowser
 from pathlib import Path
@@ -23,8 +24,27 @@ EXPORT_MIMES = {
 _EXPORT_EXT = {"html": "zip"}
 
 
+# A bare Google document id, or a Docs URL we can pull one out of. Anything
+# else is a typo or a path that does not exist — treating it as an id sent
+# people to https://docs.google.com/document/d/<their typo>/edit.
+# TODO: switch to config.validate_doc_id once that lands (same rules).
+_BARE_DOC_ID = re.compile(r"^[A-Za-z0-9_-]{20,}$")
+_DOC_URL = re.compile(r"docs\.google\.com/document/d/[A-Za-z0-9_-]+")
+
+
+def looks_like_doc_ref(target: str) -> bool:
+    """True when ``target`` is a Docs URL or a bare document id."""
+    t = target.strip()
+    return bool(_DOC_URL.search(t) or _BARE_DOC_ID.match(t))
+
+
 def resolve_doc_id(target: str) -> tuple[str, Path | None]:
-    """Resolve a linked local file OR a doc URL/ID to (doc_id, local_path|None)."""
+    """Resolve a linked local file OR a doc URL/ID to (doc_id, local_path|None).
+
+    A string that is neither an existing file nor a recognisable doc reference
+    is an error: guessing that it is a document id produces a valid-looking
+    URL for a document that cannot exist.
+    """
     p = Path(target).expanduser()
     if p.exists() and p.is_file():
         doc_id = get_doc_id(str(p.resolve()))
@@ -32,6 +52,12 @@ def resolve_doc_id(target: str) -> tuple[str, Path | None]:
             print(f"No Google Doc linked to {p}", file=sys.stderr)
             sys.exit(1)
         return doc_id, p.resolve()
+    if not looks_like_doc_ref(target):
+        print(f"{target!r} is neither a linked file nor a Google Docs URL/ID.\n"
+              f"Pass a file that exists (and is linked with `gdoc-sync link`), "
+              f"a https://docs.google.com/document/d/... URL, or a bare document id.",
+              file=sys.stderr)
+        sys.exit(2)
     return extract_doc_id_from_url(target), None
 
 

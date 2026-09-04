@@ -66,3 +66,13 @@ def status(*, remote: bool = False, json_out: bool = False) -> None:
             marks.append("in-sync")
         suffix = f"  [{', '.join(marks)}]" if marks else ""
         print(f"  {row['file']}\n    → https://docs.google.com/document/d/{row['doc_id']}/edit{suffix}")
+
+    # A mapping whose file is gone is skipped by `sync --all` and `watch --all`,
+    # so it looks like it is still syncing when it is not. Name them together,
+    # with the way out.
+    missing = [row["file"] for row in rows if not row["exists"]]
+    if missing:
+        print(f"\n{len(missing)} linked file(s) no longer exist and are skipped "
+              f"by `sync --all` / `watch --all`:")
+        for path in missing:
+            print(f"  {path}\n    forget it with: gdoc-sync unlink {path}")
