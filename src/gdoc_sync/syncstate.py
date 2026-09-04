@@ -144,6 +144,42 @@ def backup_file(path: str | os.PathLike, tag: str = "pre-sync") -> Path | None:
     return dest
 
 
+def backup_text(name: str, text: str, tag: str = "pre-push") -> Path | None:
+    """Back up text that has no local file of its own. Returns the backup path.
+
+    :func:`backup_file` covers the markdown side, where there is always a file
+    to copy. A Google Doc *tab* has no local file at all: the only copy of what
+    it holds is in the document, and a tabbed push clears the tab in one batch
+    and refills it in later ones — so a kill or an exhausted retry between them
+    leaves it empty with nothing on disk that remembers what was there. Render
+    the tab, hand the markdown here, and the same directory, naming, and
+    retention cap as an ordinary backup apply.
+
+    ``name`` identifies what is being saved (a doc id and tab id, say) rather
+    than naming a real path; it is only ever used to build the filename, so
+    :func:`list_backups` and pruning work on it exactly as on a file path.
+
+    Best-effort and never fatal, like every other backup here.
+    """
+    d = backups_dir()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = d / f"{_slug(name)}.{stamp}.{tag}.md"
+    n = 1
+    while dest.exists():  # same-second backups
+        dest = d / f"{_slug(name)}.{stamp}-{n}.{tag}.md"
+        n += 1
+    try:
+        atomic_write(dest, text)
+    except OSError:
+        return None
+    _prune_backups(name)
+    return dest
+
+
 def list_backups(path: str | os.PathLike) -> list[Path]:
     """Backups for ``path``, newest first."""
     d = backups_dir()

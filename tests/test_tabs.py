@@ -2,6 +2,7 @@
 
 import pytest
 
+from gdoc_sync import syncstate
 from gdoc_sync.tabs import (
     _prune,
     find_tab,
@@ -13,6 +14,13 @@ from gdoc_sync.tabs import (
     tab_tree,
     write_sections,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_state(tmp_path, monkeypatch):
+    """Tab snapshots must land in a throwaway state dir, not the user's."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
 
 THREE_TABS = """# [TAB] Overview
 
@@ -334,3 +342,76 @@ def test_a_failed_tab_add_never_shifts_a_section_into_another_tab():
     assert "appendix body" in into_appendix
     assert "plans body" not in "".join(t for _, t in inserts)
     assert any("no tab for 'Plans'" in s for s in said)
+
+
+# --------------------------------------------------------------------------
+# Snapshotting a tab before it is rewritten (P0-15)
+# --------------------------------------------------------------------------
+
+def test_each_tab_is_snapshotted_before_it_is_rewritten():
+    """write_tab clears first and fills later; the old text must survive that."""
+    docs = FakeDocs([_tab("a", "Monday", text="the words that were there")])
+    sections = split_tab_sections("# [TAB] Monday\n\nnew body\n")
+    write_sections(docs, drive_service=None, doc_id="DOC", sections=sections)
+
+    saved = syncstate.list_backups("DOC-a")
+    assert len(saved) == 1
+    assert "the words that were there" in saved[0].read_text(encoding="utf-8")
+    assert saved[0].parent == syncstate.backups_dir()
+
+
+def test_an_empty_tab_is_not_snapshotted():
+    """Nothing to lose, so no file — a backup dir of empties helps nobody."""
+    docs = FakeDocs([_tab("a", "Monday", text="")])
+    docs.tabs[0]["documentTab"]["body"]["content"] = []
+    sections = split_tab_sections("# [TAB] Monday\n\nnew body\n")
+    write_sections(docs, drive_service=None, doc_id="DOC", sections=sections)
+    assert syncstate.list_backups("DOC-a") == []
+
+
+def test_two_tabs_get_their_own_snapshots():
+    docs = FakeDocs([_tab("a", "Monday", text="monday words"),
+                     _tab("b", "Tuesday", text="tuesday words")])
+    sections = split_tab_sections(
+        "# [TAB] Monday\n\nx\n\n---\n\n# [TAB] Tuesday\n\ny\n")
+    write_sections(docs, drive_service=None, doc_id="DOC", sections=sections)
+    assert "monday words" in syncstate.list_backups("DOC-a")[0].read_text()
+    assert "tuesday words" in syncstate.list_backups("DOC-b")[0].read_text()
+
+
+class _BrokenWriteDocs(FakeDocs):
+    """Fails the batch that clears and refills a tab, the way a 429 would."""
+
+    def _apply(self, request):
+        if "deleteContentRange" in request or "insertText" in request:
+            raise RuntimeError("429 rate limit exceeded")
+        return super()._apply(request)
+
+
+def test_a_failed_tab_write_names_the_backup_and_the_revision():
+    docs = _BrokenWriteDocs([_tab("a", "Monday", text="irreplaceable")])
+    sections = split_tab_sections("# [TAB] Monday\n\nnew body\n")
+    said: list[str] = []
+
+    with pytest.raises(RuntimeError, match="429"):
+        write_sections(docs, drive_service=None, doc_id="DOC",
+                       sections=sections, say=said.append)
+
+    output = "\n".join(said)
+    backup = syncstate.list_backups("DOC-a")[0]
+    assert str(backup) in output
+    assert "irreplaceable" in backup.read_text(encoding="utf-8")
+    assert "rev" in output                      # FakeDocs' revisionId
+    assert "File → Version history" in output
+    assert "https://docs.google.com/document/d/DOC/edit" in output
+
+
+def test_a_snapshot_failure_does_not_stop_the_push(monkeypatch):
+    """The backup is a safety net, never a precondition."""
+    monkeypatch.setattr(syncstate, "backup_text", lambda *a, **k: None)
+    docs = FakeDocs([_tab("a", "Monday", text="words")])
+    sections = split_tab_sections("# [TAB] Monday\n\nnew body\n")
+    said: list[str] = []
+    assert write_sections(docs, drive_service=None, doc_id="DOC",
+                          sections=sections, say=said.append) == 1
+    assert any("could not save a backup" in s for s in said)

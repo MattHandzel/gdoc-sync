@@ -213,7 +213,16 @@ def pandoc_to_docx(markdown_body: str, output_path: Path,
     docx — the mechanism that makes the theme's fonts and heading colours
     *innate* to the resulting Google Doc rather than painted on afterwards
     (see :mod:`.refdoc`).
+
+    Every local image target is checked against :mod:`.image_policy` **before**
+    pandoc runs, and a violation aborts the push. Pandoc embeds the bytes of
+    whatever path it is handed, and a target can arrive from a shared document
+    that anyone with edit access can type into — so this is the last moment at
+    which ``![x](../../../.ssh/id_rsa)`` can still be stopped.
     """
+    from .image_policy import enforce_markdown
+    enforce_markdown(markdown_body, resource_dir)
+
     markdown_body = ensure_table_blank_lines(markdown_body)
     markdown_body, n_callouts = rewrite_for_pandoc(markdown_body)
 

@@ -358,11 +358,22 @@ def write_sections(docs_service, drive_service, doc_id: str,
                    theme: str | None = None, resource_dir: Path | None = None,
                    prune: bool = False, adopt_placeholder: bool = False,
                    say=lambda *_: None) -> int:
-    """Write every section into its tab and style each one. Returns tab count."""
+    """Write every section into its tab and style each one. Returns tab count.
+
+    Each tab is snapshotted to the backup directory immediately before it is
+    rewritten. :func:`~gdoc_sync.mdrequests.write_tab` is not atomic and cannot
+    be: it clears the tab in one batch and fills it in the next, and the Docs
+    API has no transaction spanning the two. So a kill, or a 429 that outlives
+    its retries, can leave a tab empty or half-written — and until now nothing
+    local knew what it had held. The snapshot is the answer to "the push died,
+    where did my tab go", together with the document's own version history,
+    which the failure message points at.
+    """
     from .mdrequests import ImageHost, markdown_to_blocks, write_tab
 
     assigned, doc = sync_tabs(docs_service, doc_id, sections, prune=prune,
                               adopt_placeholder=adopt_placeholder, say=say)
+    revision = str(doc.get("revisionId") or "")
 
     host = ImageHost(drive_service, resource_dir=resource_dir, say=say)
     try:
@@ -376,10 +387,15 @@ def write_sections(docs_service, drive_service, doc_id: str,
             if tab is None:
                 say(f"  Warning: tab {section.title!r} vanished; skipped.")
                 continue
+            backup = snapshot_tab(doc_id, tab_id, tab, say=say)
             blocks = markdown_to_blocks(section.markdown,
                                         resource_dir=resource_dir, say=say)
-            write_tab(docs_service, doc_id, tab_id, tab, blocks,
-                      image_uri=host, say=say)
+            try:
+                write_tab(docs_service, doc_id, tab_id, tab, blocks,
+                          image_uri=host, say=say)
+            except Exception:
+                _report_write_failure(doc_id, section.title, backup, revision, say)
+                raise
             say(f"  Wrote tab: {section.title}")
     finally:
         host.cleanup()
@@ -387,6 +403,48 @@ def write_sections(docs_service, drive_service, doc_id: str,
     tab_ids = [t for t in assigned if t]
     style_tabs(docs_service, doc_id, tab_ids, font=font, theme=theme, say=say)
     return len(tab_ids)
+
+
+def snapshot_tab(doc_id: str, tab_id: str, tab: dict, *, tag: str = "pre-push-tab",
+                 say=lambda *_: None):
+    """Save a tab's current content to the backup directory. Returns its path.
+
+    Rendered with the puller's own renderer, so the file is markdown the user
+    can read and paste back. Images become their placeholder text rather than
+    being downloaded: this runs before every tab write, and a snapshot is not
+    worth a round of image fetches — the words are what cannot be recovered
+    from the document's version history at a glance.
+
+    Returns None when there is nothing to save (an empty tab) or when the
+    snapshot fails; it is a safety net, never a precondition for the push.
+    """
+    from .pull import _tab_to_markdown
+    from .syncstate import backup_text
+    try:
+        text = _tab_to_markdown(tab.get("documentTab", {}) or {})
+    except Exception as e:  # noqa: BLE001 — a snapshot must not fail the push
+        say(f"  Warning: could not snapshot tab {tab_id} before writing it: {e}")
+        return None
+    if not text.strip():
+        return None   # nothing to lose
+    path = backup_text(f"{doc_id}-{tab_id}", text, tag=tag)
+    if path is None:
+        say(f"  Warning: could not save a backup of tab {tab_id} before writing it.")
+    return path
+
+
+def _report_write_failure(doc_id: str, title: str, backup, revision: str, say) -> None:
+    """Tell the user where the tab's content went, before the error propagates."""
+    say(f"  Push failed while rewriting tab {title!r}; it may be empty or "
+        f"half-written in the document.")
+    if backup is not None:
+        say(f"  Its previous content was saved to: {backup}")
+    else:
+        say("  No local snapshot was taken (the tab was empty, or the snapshot failed).")
+    if revision:
+        say(f"  The document's revision before this push was: {revision}")
+    say(f"  To restore in place, open https://docs.google.com/document/d/{doc_id}/edit "
+        f"and use File → Version history.")
 
 
 def style_tabs(docs_service, doc_id: str, tab_ids: list[str], *,

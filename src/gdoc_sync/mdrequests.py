@@ -49,6 +49,7 @@ from a re-fetch of the document. See its docstring.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -812,9 +813,25 @@ class ImageHost:
     request. It is uploaded to Drive, link-shared, inserted (Docs copies the
     bytes into the document), and then deleted again by :meth:`cleanup` — the
     document keeps its own copy, so nothing is left behind or left shared.
+
+    **Known tradeoff: the staging copy really is world-readable.** Docs fetches
+    an image URI unauthenticated, so there is no narrower permission that would
+    work. What makes that acceptable is the other half of this class: only a
+    file that passes :mod:`.image_policy` — a real image, inside the note's
+    project, not under any hidden directory — is ever uploaded, the link lives
+    for the length of one push, and :meth:`cleanup` deletes it. Every upload is
+    also tagged ``appProperties {"gdoc-sync": "staging"}`` so :meth:`reap_orphans`
+    can clear up after a push that was killed before its cleanup ran.
     """
 
     MAX_BYTES = 45 * 1024 * 1024  # Docs rejects images over 50MB
+
+    #: Marks a Drive file as one of ours, for the orphan reaper.
+    STAGING_PROPERTY = {"gdoc-sync": "staging"}
+
+    #: How long a staging copy has to survive before the reaper assumes its
+    #: push died. Well past any single push, so a concurrent one is safe.
+    ORPHAN_AGE_SECONDS = 3600
 
     def __init__(self, drive_service, resource_dir: Path | None = None,
                  say=lambda *_: None):
@@ -823,6 +840,7 @@ class ImageHost:
         self.say = say
         self._uploaded: list[str] = []
         self._cache: dict[str, str | None] = {}
+        self._reaped = False
 
     def __call__(self, target: str, alt: str = "") -> str | None:
         if target in self._cache:
@@ -832,13 +850,21 @@ class ImageHost:
         return uri
 
     def _resolve(self, target: str) -> str | None:
+        from .image_policy import check_target
+        # Only http(s) passes through: the Docs API fetches the URI itself, and
+        # anything else (a data: URI, a protocol-relative host) it would reject
+        # mid-batch is better refused here, where the alt text can stand in.
         if target.startswith(("http://", "https://")):
             return target
-        path = Path(target).expanduser()
-        if not path.is_absolute() and self.resource_dir:
-            path = self.resource_dir / path
-        if not path.is_file():
-            self.say(f"  Warning: image not found, writing its alt text: {target}")
+        path, refusal = check_target(target, self.resource_dir)
+        if refusal is not None:
+            if refusal.missing:
+                self.say(f"  Warning: image not found, writing its alt text: {target}")
+            else:
+                self.say(f"  Warning: refusing to upload {target} — {refusal.reason}. "
+                         f"Writing its alt text instead.")
+            return None
+        if path is None:   # unreachable: a target is either allowed or refused
             return None
         try:
             if path.stat().st_size > self.MAX_BYTES:
@@ -853,9 +879,14 @@ class ImageHost:
         from googleapiclient.http import MediaFileUpload
 
         from .services import NUM_RETRIES
+        # Lazily, so a push with no local images makes no Drive calls at all.
+        if not self._reaped:
+            self._reaped = True
+            self.reap_orphans()
         media = MediaFileUpload(str(path), resumable=False)
         created = self.drive.files().create(
-            body={"name": f"gdoc-sync-upload-{path.name}"},
+            body={"name": f"gdoc-sync-upload-{path.name}",
+                  "appProperties": dict(self.STAGING_PROPERTY)},
             media_body=media, fields="id",
         ).execute(num_retries=NUM_RETRIES)
         file_id = created["id"]
@@ -864,6 +895,48 @@ class ImageHost:
             fileId=file_id, body={"type": "anyone", "role": "reader"}, fields="id",
         ).execute(num_retries=NUM_RETRIES)
         return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+    def reap_orphans(self) -> int:
+        """Delete staging copies an earlier push never got to clean up.
+
+        :meth:`cleanup` runs in a ``finally``, but nothing runs after ``kill
+        -9`` or a lost laptop — and what it would have deleted is a publicly
+        readable copy of an image. So each push sweeps up whatever is still
+        tagged and older than :attr:`ORPHAN_AGE_SECONDS`; the age cut is what
+        keeps a *concurrent* push's staging files out of it.
+
+        Best effort in every direction: Drive being unhappy about the query, a
+        missing scope, or one undeletable file must never take down the push
+        the user actually asked for. Returns how many were deleted.
+        """
+        from .services import NUM_RETRIES
+        deleted = 0
+        try:
+            cutoff = time.strftime(
+                "%Y-%m-%dT%H:%M:%S",
+                time.gmtime(time.time() - self.ORPHAN_AGE_SECONDS)) + "Z"
+            key, value = next(iter(self.STAGING_PROPERTY.items()))
+            query = (f"appProperties has {{ key='{key}' and value='{value}' }} "
+                     f"and trashed = false and createdTime < '{cutoff}'")
+            listed = self.drive.files().list(
+                q=query, fields="files(id,name)", pageSize=100,
+            ).execute(num_retries=NUM_RETRIES)
+            for f in listed.get("files") or []:
+                file_id = f.get("id")
+                if not file_id:
+                    continue
+                try:
+                    self.drive.files().delete(
+                        fileId=file_id).execute(num_retries=NUM_RETRIES)
+                    deleted += 1
+                except Exception:  # noqa: BLE001 — someone else's, or already gone
+                    continue
+        except Exception:  # noqa: BLE001 — tidying up is never worth a failed push
+            return deleted
+        if deleted:
+            self.say(f"  Cleaned up {deleted} staging image(s) left by an "
+                     f"interrupted push.")
+        return deleted
 
     def cleanup(self) -> None:
         """Delete the staging copies. Safe to call more than once."""
