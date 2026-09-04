@@ -233,6 +233,7 @@ def test_a_style_range_never_points_past_the_document():
     "# Heading one\n\nBody text.\n",
     "# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6\n",
     "Some **bold** and *italic* and `code` in one line.\n",
+    "Some ~~struck~~ text.\n",
     "A [link](https://example.com) mid-sentence.\n",
     "- one\n- two\n- three\n",
     "1. first\n1. second\n",

@@ -303,6 +303,11 @@ def _convert_paragraph_elements(
                 stripped = formatted.strip()
                 formatted = formatted.replace(stripped, f"*{stripped}*")
 
+            # Outermost, so `~~**x**~~` comes back the way GFM writes it.
+            if style.get("strikethrough"):
+                stripped = formatted.strip()
+                formatted = formatted.replace(stripped, f"~~{stripped}~~")
+
         md_parts.append(formatted)
 
     return "".join(plain_parts), "".join(md_parts)

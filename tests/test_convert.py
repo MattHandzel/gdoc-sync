@@ -45,6 +45,15 @@ def test_bold_italic_link():
     assert "[a link](https://example.com)" in md
 
 
+def test_strikethrough():
+    """`push` writes it, so a pull that dropped it churned the file every time."""
+    doc = {"body": {"content": [
+        _para([_run("gone", strikethrough=True), _run(" kept"), _run("\n")]),
+    ]}}
+    md, _ = doc_to_markdown(doc)
+    assert "~~gone~~ kept" in md
+
+
 def test_bullet_and_ordered_lists():
     lists = {
         "ul": {"listProperties": {"nestingLevels": [{"glyphType": "GLYPH_TYPE_UNSPECIFIED"}]}},

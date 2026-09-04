@@ -37,6 +37,12 @@ the file actually in hand at the moment of the push, rather than a flag
 recorded once at import time. `--pull-only` still exists for documents that
 genuinely cannot round-trip.
 
+### Strikethrough survives a pull
+
+`push` has always written `~~struck~~` into the doc; the puller had no case
+for it, so every pull quietly deleted the markers and the file churned on the
+next sync.
+
 ### Code blocks keep their font when a theme is applied
 
 Applying the document-wide font used to sweep over monospace runs. Since the
