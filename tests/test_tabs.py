@@ -11,6 +11,7 @@ from gdoc_sync.tabs import (
     stamp_tab_id,
     sync_tabs,
     tab_tree,
+    write_sections,
 )
 
 THREE_TABS = """# [TAB] Overview
@@ -287,3 +288,49 @@ def test_a_new_documents_placeholder_tab_is_renamed_not_doubled():
 def test_titles_with_punctuation_round_trip(title):
     sections = split_tab_sections(f"# [TAB] {title}\n\nbody\n")
     assert sections[0].title == title
+
+
+class _FlakyDocs(FakeDocs):
+    """Like FakeDocs, but one addDocumentTab comes back without a tabId."""
+
+    def __init__(self, tabs, fails: str):
+        super().__init__(tabs)
+        self.fails = fails
+
+    def _apply(self, request):
+        if ("addDocumentTab" in request
+                and request["addDocumentTab"]["tabProperties"]["title"] == self.fails):
+            self.sent.append(request)
+            return {"addDocumentTab": {"tabProperties": {}}}
+        return super()._apply(request)
+
+
+def test_a_failed_tab_add_keeps_its_slot():
+    docs = _FlakyDocs([_tab("a", "Overview"), _tab("d", "Appendix")], fails="Plans")
+    sections = split_tab_sections(
+        "# [TAB] Overview\n\nx\n\n---\n\n# [TAB] Plans\n\ny\n\n---\n\n"
+        "# [TAB] Appendix\n\nz\n")
+    said: list[str] = []
+    ids, _ = sync_tabs(docs, "DOC", sections, say=said.append)
+    assert ids == ["a", None, "d"]
+    assert any("could not create tab 'Plans'" in s for s in said)
+    assert not any("Added tab: Plans" in s for s in said)
+
+
+def test_a_failed_tab_add_never_shifts_a_section_into_another_tab():
+    """Regression: Plans' body used to be written into the Appendix tab."""
+    docs = _FlakyDocs([_tab("a", "Overview"), _tab("d", "Appendix")], fails="Plans")
+    sections = split_tab_sections(
+        "# [TAB] Overview\n\noverview body\n\n---\n\n"
+        "# [TAB] Plans\n\nplans body\n\n---\n\n"
+        "# [TAB] Appendix\n\nappendix body\n")
+    said: list[str] = []
+    written = write_sections(docs, drive_service=None, doc_id="DOC",
+                             sections=sections, say=said.append)
+    assert written == 2
+    inserts = [(r["insertText"]["location"].get("tabId"), r["insertText"]["text"])
+               for r in docs.sent if "insertText" in r]
+    into_appendix = "".join(t for tab, t in inserts if tab == "d")
+    assert "appendix body" in into_appendix
+    assert "plans body" not in "".join(t for _, t in inserts)
+    assert any("no tab for 'Plans'" in s for s in said)

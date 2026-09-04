@@ -210,8 +210,14 @@ def stamp_tab_id(requests: list[dict], tab_id: str) -> list[dict]:
 
 def sync_tabs(docs_service, doc_id: str, sections: list[TabSection], *,
               prune: bool = False, adopt_placeholder: bool = False,
-              say=lambda *_: None) -> tuple[list[str], dict]:
+              say=lambda *_: None) -> tuple[list[str | None], dict]:
     """Make the document's tabs match ``sections``. Returns (tab ids, doc).
+
+    The tab ids are **one per section, in section order**, with ``None`` where
+    a tab could not be created. Keeping the slot matters: a caller pairs each
+    section with its id by position, and dropping a failed one would shift
+    every later section into the wrong tab (which is exactly how an Appendix
+    tab once got overwritten with a Plans body).
 
     The returned document is the state *after* any tabs were added or removed,
     so a caller can go straight on to writing content without re-fetching.
@@ -285,15 +291,17 @@ def sync_tabs(docs_service, doc_id: str, sections: list[TabSection], *,
             for (i, _), reply in zip(pending, replies):
                 new_id = (reply.get("addDocumentTab", {})
                           .get("tabProperties", {}).get("tabId"))
+                if not new_id:
+                    say(f"  Warning: could not create tab {sections[i].title!r}; "
+                        f"its section will not be written.")
+                    continue
                 assigned[i] = new_id
                 say(f"  Added tab: {sections[i].title}")
 
-    tab_ids = [t for t in assigned if t]
-
     if prune:
-        _prune(docs_service, doc_id, existing, set(tab_ids), say)
+        _prune(docs_service, doc_id, existing, {t for t in assigned if t}, say)
 
-    return tab_ids, fetch_tabs(docs_service, doc_id)
+    return assigned, fetch_tabs(docs_service, doc_id)
 
 
 def _prune(docs_service, doc_id: str, existing: list[RemoteTab],
@@ -353,12 +361,17 @@ def write_sections(docs_service, drive_service, doc_id: str,
     """Write every section into its tab and style each one. Returns tab count."""
     from .mdrequests import ImageHost, markdown_to_blocks, write_tab
 
-    tab_ids, doc = sync_tabs(docs_service, doc_id, sections, prune=prune,
-                             adopt_placeholder=adopt_placeholder, say=say)
+    assigned, doc = sync_tabs(docs_service, doc_id, sections, prune=prune,
+                              adopt_placeholder=adopt_placeholder, say=say)
 
     host = ImageHost(drive_service, resource_dir=resource_dir, say=say)
     try:
-        for section, tab_id in zip(sections, tab_ids):
+        # Paired by position, so a section whose tab could not be created
+        # is skipped here rather than shifting the ones after it.
+        for section, tab_id in zip(sections, assigned):
+            if tab_id is None:
+                say(f"  Warning: no tab for {section.title!r}; section not written.")
+                continue
             tab = find_tab(doc, tab_id)
             if tab is None:
                 say(f"  Warning: tab {section.title!r} vanished; skipped.")
@@ -371,6 +384,7 @@ def write_sections(docs_service, drive_service, doc_id: str,
     finally:
         host.cleanup()
 
+    tab_ids = [t for t in assigned if t]
     style_tabs(docs_service, doc_id, tab_ids, font=font, theme=theme, say=say)
     return len(tab_ids)
 
