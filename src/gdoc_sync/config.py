@@ -25,13 +25,22 @@ level (legacy format).
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
 import re
 import sys
 import tempfile
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import yaml
+
+try:  # POSIX only. Without it there is no advisory lock — see state_lock().
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 DEFAULT_FONT = "Garamond"
 DEFAULT_THEME = "professional"
@@ -184,6 +193,13 @@ def get_custom_themes() -> dict:
 # State (mappings + revisions)
 # ---------------------------------------------------------------------------
 
+# How long a mutator waits for the state lock before giving up. Generous: the
+# critical section is a small read-modify-write, so anything near this means a
+# stuck process, not honest contention.
+STATE_LOCK_TIMEOUT = 10.0
+_STATE_LOCK_POLL = 0.01
+
+
 def state_path() -> Path:
     config = load_config()
     explicit = config.get("state_file")
@@ -254,20 +270,115 @@ def save_state(state: dict) -> None:
     atomic_write(state_path(), yaml.dump(state, default_flow_style=False))
 
 
+def state_lock_path() -> Path:
+    """The advisory lock file guarding the state file (a sibling ``.lock``)."""
+    p = state_path()
+    return p.with_name(p.name + ".lock")
+
+
+@contextlib.contextmanager
+def state_lock(timeout: float = STATE_LOCK_TIMEOUT) -> Iterator[Path | None]:
+    """Hold an exclusive advisory lock on the state file for the block's duration.
+
+    Every write to the state file is a read-modify-write of the whole YAML
+    document, so two unsynchronised writers interleave as "both read, both
+    modify their own copy, last one wins" — and the loser's mapping is gone,
+    with both processes exiting 0. Twenty parallel ``gdoc-sync link`` runs used
+    to leave thirteen mappings, and a dropped mapping means the next ``create``
+    makes a *duplicate* Google Doc. Holding this lock across the load and the
+    save is what makes those twenty runs leave twenty mappings.
+
+    The lock is a ``flock`` on ``<state file>.lock`` — a sibling file rather
+    than the state file itself, because :func:`save_state` replaces the state
+    file by rename, which would strand a lock taken on the old inode.
+
+    Acquisition polls with ``LOCK_NB`` and gives up after ``timeout`` seconds
+    with a :class:`RuntimeError` naming the lock file, so a stale holder is a
+    legible error rather than a hang.
+
+    Not reentrant: a second :func:`state_lock` inside one already held blocks
+    until it times out, in this process as in any other.
+
+    On platforms without ``fcntl`` (Windows) this degrades to a no-op context
+    manager and yields ``None``. Concurrent mutators there remain racy, exactly
+    as they were before; single-process use is unaffected.
+    """
+    if fcntl is None:  # pragma: no cover - Windows
+        yield None
+        return
+
+    lock_path = state_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"timed out after {timeout:g}s waiting for the gdoc-sync state lock "
+                        f"({lock_path}); another gdoc-sync process may be stuck — if none is "
+                        f"running it is safe to delete that file"
+                    ) from e
+                time.sleep(_STATE_LOCK_POLL)
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def mutate_state(fn: Callable[[dict], object], timeout: float = STATE_LOCK_TIMEOUT) -> object:
+    """Read-modify-write the state file under :func:`state_lock`.
+
+    ``fn`` is handed the loaded state and mutates it in place. Its return value
+    is the whole contract, and it means two things at once:
+
+    * **truthy** — the state is written back, and the value is returned to the
+      caller (so a mutator can hand back its own result: ``True``, the removed
+      flag, a :class:`~gdoc_sync.syncstate.Conflict`, …).
+    * **falsey** — nothing is written, and the value is still returned. This is
+      how an idempotent no-op (marking an already-marked file) avoids
+      rewriting the file.
+
+    Load, mutate and save all happen inside one lock, which is the point: the
+    lock has to span the read *and* the write or the race is unchanged.
+    """
+    with state_lock(timeout):
+        state = load_state()
+        result = fn(state)
+        if result:
+            save_state(state)
+        return result
+
+
 def get_doc_id(local_path: str | os.PathLike) -> str | None:
     state = load_state()
     return state.get("mappings", {}).get(str(Path(local_path).resolve()))
 
 
 def set_doc_id(local_path: str | os.PathLike, doc_id: str, revision_id: str = "") -> None:
-    state = load_state()
-    state.setdefault("mappings", {})
-    state.setdefault("revisions", {})
     resolved = str(Path(local_path).resolve())
-    state["mappings"][resolved] = doc_id
-    if revision_id:
-        state["revisions"][resolved] = revision_id
-    save_state(state)
+
+    def apply(state: dict) -> bool:
+        state.setdefault("mappings", {})
+        state.setdefault("revisions", {})
+        state["mappings"][resolved] = doc_id
+        if revision_id:
+            state["revisions"][resolved] = revision_id
+        return True
+
+    mutate_state(apply)
 
 
 def get_revision(local_path: str | os.PathLike) -> str | None:
@@ -276,23 +387,28 @@ def get_revision(local_path: str | os.PathLike) -> str | None:
 
 
 def set_revision(local_path: str | os.PathLike, revision_id: str) -> None:
-    state = load_state()
-    state.setdefault("revisions", {})
-    state["revisions"][str(Path(local_path).resolve())] = revision_id
-    save_state(state)
+    resolved = str(Path(local_path).resolve())
+
+    def apply(state: dict) -> bool:
+        state.setdefault("revisions", {})
+        state["revisions"][resolved] = revision_id
+        return True
+
+    mutate_state(apply)
 
 
 def remove_mapping(local_path: str | os.PathLike) -> bool:
     """Unlink a local file from its doc. Returns True if a mapping was removed."""
-    state = load_state()
     resolved = str(Path(local_path).resolve())
-    removed = state.get("mappings", {}).pop(resolved, None) is not None
-    state.get("revisions", {}).pop(resolved, None)
-    if resolved in state.get("pull_only", []):
-        state["pull_only"].remove(resolved)
-    if removed:
-        save_state(state)
-    return removed
+
+    def apply(state: dict) -> bool:
+        removed = state.get("mappings", {}).pop(resolved, None) is not None
+        state.get("revisions", {}).pop(resolved, None)
+        if resolved in state.get("pull_only", []):
+            state["pull_only"].remove(resolved)
+        return removed
+
+    return bool(mutate_state(apply))
 
 
 def all_mappings() -> dict[str, str]:
@@ -320,16 +436,19 @@ def is_pull_only(local_path: str | os.PathLike) -> bool:
 
 def set_pull_only(local_path: str | os.PathLike, enabled: bool = True) -> None:
     """Mark (or unmark) a file as one-way. Idempotent."""
-    state = load_state()
     resolved = str(Path(local_path).resolve())
-    marked = state.setdefault("pull_only", [])
-    if enabled and resolved not in marked:
-        marked.append(resolved)
-    elif not enabled and resolved in marked:
-        marked.remove(resolved)
-    else:
-        return
-    save_state(state)
+
+    def apply(state: dict) -> bool:
+        marked = state.setdefault("pull_only", [])
+        if enabled and resolved not in marked:
+            marked.append(resolved)
+        elif not enabled and resolved in marked:
+            marked.remove(resolved)
+        else:
+            return False  # already in the wanted state; don't rewrite the file
+        return True
+
+    mutate_state(apply)
 
 
 # ---------------------------------------------------------------------------

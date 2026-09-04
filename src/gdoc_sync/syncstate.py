@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import atomic_write, load_state, save_state
+from .config import atomic_write, load_state, mutate_state
 
 # How many timestamped backups to keep per file before pruning the oldest.
 MAX_BACKUPS = 20
@@ -213,22 +213,25 @@ def set_conflict(
         markers=markers,
         remote_copy=remote_copy,
     )
-    state = load_state()
-    state.setdefault("conflicts", {})[conflict.path] = conflict.as_dict()
-    save_state(state)
-    return conflict
+
+    def apply(state: dict) -> Conflict:
+        state.setdefault("conflicts", {})[conflict.path] = conflict.as_dict()
+        return conflict  # truthy, so mutate_state saves and hands it back
+
+    return mutate_state(apply)  # type: ignore[return-value]
 
 
 def clear_conflict(path: str | os.PathLike) -> bool:
     """Clear a file's conflict flag. Returns True if one was set."""
-    state = load_state()
-    conflicts = state.get("conflicts")
-    if not isinstance(conflicts, dict):
-        return False
-    if conflicts.pop(_key(path), None) is None:
-        return False
-    save_state(state)
-    return True
+    key = _key(path)
+
+    def apply(state: dict) -> bool:
+        conflicts = state.get("conflicts")
+        if not isinstance(conflicts, dict):
+            return False
+        return conflicts.pop(key, None) is not None
+
+    return bool(mutate_state(apply))
 
 
 def all_conflicts() -> dict[str, Conflict]:

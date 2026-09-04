@@ -1,6 +1,12 @@
 """Config/state resolution, overrides, and legacy-format compatibility."""
 
+import os
+import stat
+import subprocess
+import sys
 import textwrap
+import threading
+from pathlib import Path
 
 import pytest
 
@@ -207,3 +213,144 @@ def test_custom_theme_heading_shapes():
     by_map = _normalize_theme({"headings": {"heading_2": "#b", "TITLE": "#t"}})
     assert by_map["headings"]["HEADING_2"] == "#b"
     assert by_map["headings"]["TITLE"] == "#t"
+
+
+# ---------------------------------------------------------------------------
+# State locking (P0-10): concurrent mutators must not lose each other's writes
+# ---------------------------------------------------------------------------
+
+needs_fcntl = pytest.mark.skipif(
+    config.fcntl is None, reason="no fcntl on this platform; state_lock is a no-op there"
+)
+
+# Run in a *separate process* so the mappings can only survive via the on-disk
+# lock — an in-process lock would pass this test while the real bug remained.
+_LINK_CHILD = textwrap.dedent("""
+    import sys
+    from gdoc_sync import config
+    config.set_doc_id(sys.argv[1], sys.argv[2])
+""")
+
+
+@needs_fcntl
+def test_parallel_set_doc_id_keeps_every_mapping(tmp_path):
+    """24 concurrent `link`-shaped writers, 24 mappings. Unlocked this loses ~a third."""
+    import gdoc_sync
+
+    n = 24
+    src_root = str(Path(gdoc_sync.__file__).resolve().parent.parent)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([src_root, env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "config")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
+    env.pop("GDOC_SYNC_CONFIG", None)
+
+    files, procs = [], []
+    for i in range(n):
+        f = tmp_path / f"f{i}.md"
+        f.write_text("x")
+        files.append(f)
+        procs.append(subprocess.Popen(
+            [sys.executable, "-c", _LINK_CHILD, str(f), f"doc{i}"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ))
+
+    for p in procs:
+        _, err = p.communicate(timeout=60)
+        assert p.returncode == 0, err.decode()
+
+    mappings = config.all_mappings()
+    missing = [i for i, f in enumerate(files) if str(f.resolve()) not in mappings]
+    assert not missing, f"{len(missing)} of {n} mappings lost: {missing}"
+    for i, f in enumerate(files):
+        assert mappings[str(f.resolve())] == f"doc{i}"
+
+
+@needs_fcntl
+def test_state_lock_blocks_a_second_holder(tmp_path):
+    acquired = threading.Event()
+
+    def second():
+        with config.state_lock(timeout=5):
+            acquired.set()
+
+    with config.state_lock():
+        t = threading.Thread(target=second, daemon=True)
+        t.start()
+        assert not acquired.wait(0.4), "second holder got the lock while it was held"
+    assert acquired.wait(5), "second holder never got the lock after release"
+    t.join(timeout=5)
+
+
+@needs_fcntl
+def test_state_lock_times_out_with_a_clear_error(tmp_path):
+    holding, release = threading.Event(), threading.Event()
+
+    def holder():
+        with config.state_lock():
+            holding.set()
+            release.wait(10)
+
+    t = threading.Thread(target=holder, daemon=True)
+    t.start()
+    assert holding.wait(5)
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            with config.state_lock(timeout=0.1):
+                pass
+        assert str(config.state_lock_path()) in str(excinfo.value)
+    finally:
+        release.set()
+        t.join(timeout=5)
+
+
+@needs_fcntl
+def test_lock_file_sits_beside_state_and_is_private(tmp_path):
+    f = tmp_path / "note.md"
+    f.write_text("x")
+    config.set_doc_id(f, "doc1")
+    lock = config.state_lock_path()
+    assert lock == config.state_path().with_name("state.yaml.lock")
+    assert lock.exists()
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
+def test_mutate_state_falsey_result_writes_nothing(tmp_path):
+    f = tmp_path / "note.md"
+    f.write_text("x")
+    config.set_doc_id(f, "doc1")
+    # truthy result -> written back
+    assert config.mutate_state(lambda state: state.pop("mappings")) is not None
+    assert config.all_mappings() == {}
+    # falsey result -> the mutation is discarded, the file untouched
+    before = config.state_path().read_text()
+
+    def scribble(state):
+        state["mappings"] = {"ghost": "docZ"}
+        return False
+
+    assert config.mutate_state(scribble) is False
+    assert config.state_path().read_text() == before
+    assert config.all_mappings() == {}
+
+
+def test_corrupt_state_is_still_salvaged_under_the_lock(tmp_path):
+    p = config.state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("mappings: [unterminated\n")
+    f = tmp_path / "note.md"
+    f.write_text("x")
+    config.set_doc_id(f, "doc1")
+    assert p.with_suffix(p.suffix + ".corrupt").exists()
+    assert config.get_doc_id(f) == "doc1"
+
+
+def test_set_pull_only_is_idempotent_and_removable(tmp_path):
+    f = tmp_path / "note.md"
+    f.write_text("x")
+    config.set_pull_only(f)
+    config.set_pull_only(f)  # no-op, must not duplicate
+    assert config.load_state()["pull_only"] == [str(f.resolve())]
+    assert config.is_pull_only(f) is True
+    config.set_pull_only(f, False)
+    assert config.is_pull_only(f) is False
