@@ -303,12 +303,17 @@ def all_mappings() -> dict[str, str]:
 def is_pull_only(local_path: str | os.PathLike) -> bool:
     """Whether this file is marked one-way (doc → markdown, never the reverse).
 
-    Some docs cannot survive a round trip. A tabbed doc is the clear case:
-    :func:`~gdoc_sync.pull.pull` flattens every tab into one markdown file with
-    ``# [TAB]`` headers, but a push writes the whole flattened text back into
-    the *first* tab — so an automatic push would silently destroy the document's
-    tab structure. Marking such a file pull-only lets it take part in `sync
-    --all` and `watch --all` without that risk.
+    Some docs cannot survive a round trip — a document full of equations,
+    footnotes, charts or suggestions loses them on the way back. Marking such
+    a file pull-only lets it take part in `sync --all` and `watch --all`
+    without that risk.
+
+    Tabbed docs used to be the headline case and are no longer: `push` writes
+    each ``# [TAB] <title>`` section into its own tab, and refuses to push a
+    file that has lost those headers into a document that still has the tabs
+    (see :func:`gdoc_sync.push._guard_flatten`). That guard reads the file in
+    hand at the moment of the push, which is a truer test than a flag recorded
+    once at import time.
     """
     return str(Path(local_path).resolve()) in load_state().get("pull_only", [])
 

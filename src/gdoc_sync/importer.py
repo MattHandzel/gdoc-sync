@@ -108,10 +108,12 @@ def import_doc(
 ) -> Path:
     """Import a Google Doc as a new markdown file and link the two.
 
-    ``pull_only`` defaults to deciding per document: a tabbed doc is imported
-    one-way, because pushing the flattened markdown back would collapse every
-    tab into the first one. Pass ``False`` to override that and accept the risk,
-    or ``True`` to force one-way on a single-tab doc.
+    ``pull_only`` defaults to two-way for every document. It used to default
+    to one-way for a *tabbed* doc, because pushing the flattened markdown back
+    would have collapsed every tab into the first one — `push` now writes tabs
+    (see :mod:`.tabs`), and refuses the flattening push outright when a file
+    has lost its ``[TAB]`` headers, so the mark is no longer the thing keeping
+    a tabbed doc safe. Pass ``True`` to make any document one-way anyway.
 
     Returns the path written.
     """
@@ -145,17 +147,18 @@ def import_doc(
     clear_conflict(path)
 
     if pull_only is None:
-        pull_only = rendered.tabs > 1
+        pull_only = False
     set_pull_only(path, pull_only)
 
     say(f"  Written to {path}")
     if rendered.images:
         say(f"  Downloaded {rendered.images} image(s)")
     if pull_only:
-        reason = (f"{rendered.tabs} tabs — a push would flatten them into the first tab"
-                  if rendered.tabs > 1 else "requested")
-        say(f"  Marked PULL-ONLY ({reason}). `sync`/`watch` will bring doc edits "
-            f"down but never push local edits up.")
+        say("  Marked PULL-ONLY (requested). `sync`/`watch` will bring doc edits "
+            "down but never push local edits up.")
+    elif rendered.tabs > 1:
+        say(f"  Two-way: {rendered.tabs} tabs, one `# [TAB] <title>` section "
+            f"each. Keep the headers and `push` rewrites each tab in place.")
     else:
         say("  Two-way: `gdoc-sync watch --all` keeps this in sync both ways.")
 

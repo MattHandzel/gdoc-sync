@@ -114,11 +114,16 @@ def test_no_frontmatter_flag(tmp_path, monkeypatch):
     assert path.read_text() == "# Body\n"
 
 
-def test_multi_tab_doc_is_pull_only_by_default(tmp_path, monkeypatch):
-    """Pushing a flattened tabbed doc would collapse every tab into the first."""
+def test_multi_tab_doc_is_two_way_by_default(tmp_path, monkeypatch):
+    """`push` writes tabs now, so a tabbed import is no longer marked one-way.
+
+    What keeps a tabbed doc safe is push's own guard, which refuses to flatten
+    a document whose markdown has lost its [TAB] headers — a check on the file
+    in hand rather than a flag recorded at import time.
+    """
     _stub_render(monkeypatch, tabs=3)
     path = importer.import_doc("DOC123", dest=tmp_path, say=lambda *_: None)
-    assert config.is_pull_only(path)
+    assert not config.is_pull_only(path)
 
 
 def test_single_tab_doc_is_two_way_by_default(tmp_path, monkeypatch):
@@ -127,11 +132,11 @@ def test_single_tab_doc_is_two_way_by_default(tmp_path, monkeypatch):
     assert not config.is_pull_only(path)
 
 
-def test_two_way_override_on_a_tabbed_doc(tmp_path, monkeypatch):
+def test_pull_only_override_on_a_tabbed_doc(tmp_path, monkeypatch):
     _stub_render(monkeypatch, tabs=3)
-    path = importer.import_doc("DOC123", dest=tmp_path, pull_only=False,
+    path = importer.import_doc("DOC123", dest=tmp_path, pull_only=True,
                                say=lambda *_: None)
-    assert not config.is_pull_only(path)
+    assert config.is_pull_only(path)
 
 
 def test_refuses_to_clobber_without_force(tmp_path, monkeypatch):

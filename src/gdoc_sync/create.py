@@ -8,6 +8,13 @@ Pipeline:
     5. Set the sharing permission (default: anyone with link can comment)
     6. Save the local→doc-id mapping so `push`/`pull` work later
     7. Copy the URL to the clipboard and print it
+
+Steps 2-4 have a second form. A file whose top-level sections are
+``# [TAB] <title>`` asks for a multi-tab document, and Drive's importer cannot
+build one — it replaces a whole document and cannot address a tab. Such a file
+takes :func:`_create_tabbed` instead, which makes an empty doc through the Docs
+API and writes each section into its own tab (see :mod:`.tabs`). Everything
+from step 5 on is the same either way.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ from .refdoc import styled_reference_docx
 from .services import NUM_RETRIES, get_services
 from .style import apply_document_styling
 from .sync import record_sync_baseline
+from .tabs import split_tab_sections, write_sections
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -52,34 +60,10 @@ def parse_share_with(entry: str) -> tuple[str, str]:
     return email, role
 
 
-def create_doc(
-    local_path: Path,
-    *,
-    title: str | None = None,
-    font: str | None = None,
-    theme: str | None = None,
-    share_mode: str = "comment",  # private | view | comment | edit
-    share_with: list[str] | None = None,  # "email[:view|comment|edit]"
-    copy: bool | None = None,
-    save_mapping: bool = True,
-    open_in_browser: bool = False,
-) -> str:
-    """Create a new Google Doc from a markdown file. Returns the doc URL."""
-    drive_service, docs_service = get_services()
-
-    raw_md = local_path.read_text()
-
-    if not title:
-        title = derive_title(raw_md, local_path.stem)
-    if font is None:
-        font = get_font()
-    if theme is None:
-        theme = get_theme()
-    if copy is None:
-        copy = get_clipboard_default()
-
-    body_md = strip_comments(strip_frontmatter(raw_md))
-
+def _create_from_docx(drive_service, docs_service, title: str, body_md: str, *,
+                      font: str | None, theme: str | None,
+                      resource_dir: Path) -> tuple[str, str]:
+    """The ordinary path: pandoc → docx → Drive import → styling."""
     # Bake the theme into the docx's style definitions so the new doc's named
     # styles genuinely carry it (see refdoc) rather than having colour painted
     # over pandoc's blue defaults afterwards.
@@ -89,7 +73,7 @@ def create_doc(
     print("Converting markdown → docx via pandoc...")
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = Path(tmpdir) / "doc.docx"
-        pandoc_to_docx(body_md, docx_path, resource_dir=local_path.parent,
+        pandoc_to_docx(body_md, docx_path, resource_dir=resource_dir,
                        reference_doc=reference_doc,
                        highlight_style=highlight_style)
 
@@ -121,6 +105,71 @@ def create_doc(
                   + f" ({where})")
     except HttpError as e:
         print(f"  Warning: could not apply styling: {e}")
+
+    return doc_id, url
+
+
+def _create_tabbed(drive_service, docs_service, title: str, sections, *,
+                   font: str | None, theme: str | None,
+                   resource_dir: Path) -> tuple[str, str]:
+    """The tabbed path: an empty document, then one tab per section.
+
+    Created through the Docs API rather than a Drive import, because the
+    import would have to be replaced tab by tab immediately afterwards. The
+    document arrives with a single placeholder tab, which the first section
+    adopts rather than being added alongside.
+    """
+    print(f"Creating Google Doc: {title}  ({len(sections)} tabs)")
+    created = docs_service.documents().create(
+        body={"title": title}).execute(num_retries=NUM_RETRIES)
+    doc_id = created["documentId"]
+
+    write_sections(docs_service, drive_service, doc_id, sections,
+                   font=font, theme=theme, resource_dir=resource_dir,
+                   adopt_placeholder=True, say=print)
+
+    return doc_id, f"https://docs.google.com/document/d/{doc_id}/edit"
+
+
+def create_doc(
+    local_path: Path,
+    *,
+    title: str | None = None,
+    font: str | None = None,
+    theme: str | None = None,
+    share_mode: str = "comment",  # private | view | comment | edit
+    share_with: list[str] | None = None,  # "email[:view|comment|edit]"
+    copy: bool | None = None,
+    save_mapping: bool = True,
+    open_in_browser: bool = False,
+) -> str:
+    """Create a new Google Doc from a markdown file. Returns the doc URL."""
+    drive_service, docs_service = get_services()
+
+    raw_md = local_path.read_text()
+
+    if not title:
+        title = derive_title(raw_md, local_path.stem)
+    if font is None:
+        font = get_font()
+    if theme is None:
+        theme = get_theme()
+    if copy is None:
+        copy = get_clipboard_default()
+
+    body_md = strip_comments(strip_frontmatter(raw_md))
+
+    # A file whose top-level sections are `# [TAB] <title>` asks for a tabbed
+    # document, which Drive's docx importer cannot produce — see .tabs.
+    sections = split_tab_sections(body_md, say=print)
+    if sections:
+        doc_id, url = _create_tabbed(
+            drive_service, docs_service, title, sections,
+            font=font, theme=theme, resource_dir=local_path.parent)
+    else:
+        doc_id, url = _create_from_docx(
+            drive_service, docs_service, title, body_md,
+            font=font, theme=theme, resource_dir=local_path.parent)
 
     if share_mode != "private":
         role = SHARE_ROLES.get(share_mode, "reader")

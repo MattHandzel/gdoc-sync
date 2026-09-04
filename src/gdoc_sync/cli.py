@@ -27,7 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gdoc-sync",
         description="Sync Markdown files with Google Docs — create, push, pull, "
-                    "comment round-trip, and opinionated styling.",
+                    "multi-tab documents, comment round-trip, and opinionated "
+                    "styling.",
     )
     parser.add_argument("--config", metavar="PATH",
                         help="config file (overrides $GDOC_SYNC_CONFIG and the XDG default)")
@@ -61,9 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not add the title/source/imported YAML header")
     oneway = p.add_mutually_exclusive_group()
     oneway.add_argument("--pull-only", action="store_true",
-                        help="never push local edits back (default for tabbed docs)")
+                        help="never push local edits back")
     oneway.add_argument("--two-way", action="store_true",
-                        help="allow pushes even for a tabbed doc (flattens its tabs)")
+                        help="clear a previous --pull-only mark (the default)")
     p.add_argument("--open", action="store_true", help="open the doc in the browser")
 
     p = sub.add_parser("push", help="push local markdown to its linked Google Doc")
@@ -72,6 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="overwrite the remote even if it changed since last pull")
     p.add_argument("--font")
     p.add_argument("--theme")
+    p.add_argument("--prune-tabs", action="store_true",
+                   help="delete tabs the markdown no longer has a "
+                        "`# [TAB] <title>` section for (default: leave them)")
+    p.add_argument("--flatten", action="store_true",
+                   help="push a file with no [TAB] headers into a tabbed doc, "
+                        "collapsing every tab into the first one")
 
     p = sub.add_parser("pull", help="pull a Google Doc as markdown (with comments as CriticMarkup)")
     p.add_argument("target", help="a linked local file, or a doc URL/ID")
@@ -226,7 +233,9 @@ def _dispatch(args: argparse.Namespace) -> None:
 
     elif args.command == "push":
         from .push import push
-        _api_guard(lambda: push(args.file, yes=args.yes, font=args.font, theme=args.theme))
+        _api_guard(lambda: push(args.file, yes=args.yes, font=args.font,
+                                theme=args.theme, prune_tabs=args.prune_tabs,
+                                flatten=args.flatten))
 
     elif args.command == "pull":
         from .config import extract_doc_id_from_url, get_doc_id
