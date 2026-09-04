@@ -47,9 +47,19 @@ from .syncstate import backup_file
 from .tabs import read_tabs, split_tab_sections, write_sections
 
 
+class RemoteChanged(RuntimeError):
+    """The doc's text moved between the caller's render and this push.
+
+    Raised before anything is written, so the caller can simply try again on
+    the next pass with a fresh render instead of uploading content that would
+    silently drop whatever was typed in the meantime.
+    """
+
+
 def push(local_path: Path, *, yes: bool = False, font: str | None = None,
          theme: str | None = None, merged: bool = False,
-         prune_tabs: bool = False, flatten: bool = False) -> str:
+         prune_tabs: bool = False, flatten: bool = False,
+         expected_fingerprint: str | None = None) -> str:
     """Push a markdown file to its linked Google Doc.
 
     Returns the markdown that was actually pushed — the file's text with any
@@ -63,6 +73,12 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
     ``prune_tabs`` deletes tabs the markdown does not mention (tabbed files
     only). ``flatten`` allows the destructive push of a file with no ``[TAB]``
     headers into a document that has several tabs.
+
+    ``expected_fingerprint`` is the sync engine's answer to the lost-update
+    race that ``merged`` opens up: it merged the doc as of one render, and
+    anything typed between that render and this upload would be overwritten
+    with no conflict at all. Give it and a doc whose text has moved since
+    raises :class:`RemoteChanged` before any comment action or upload.
     """
     doc_id = get_doc_id(str(local_path))
     if not doc_id:
@@ -80,21 +96,35 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
     current_rev = doc.get("revisionId", "")
     stored_rev = get_revision(str(local_path))
 
-    # Optimistic locking: warn when the remote changed since our last pull/push.
+    # The lost-update guard, and the first thing checked: it must fire before
+    # any comment action or upload, both of which change the doc.
+    if expected_fingerprint is not None:
+        from .convert import doc_text_fingerprint
+        if doc_text_fingerprint(doc) != expected_fingerprint:
+            raise RemoteChanged(
+                f"{local_path.name}: the doc was edited between the render "
+                f"this push was prepared from and now")
+
     if stored_rev and current_rev != stored_rev and not merged:
+        # Optimistic locking: warn when the remote changed since our last
+        # pull/push.
         print("WARNING: Google Doc has been modified since last pull.")
         print(f"  Stored revision:  {stored_rev[:16]}...")
         print(f"  Current revision: {current_rev[:16]}...")
-        if yes:
-            print("  --yes given; overwriting remote.")
-        elif not sys.stdin.isatty():
-            print("Refusing to overwrite non-interactively without --yes.", file=sys.stderr)
-            sys.exit(2)
-        else:
-            response = input("Overwrite remote? [y/N] ")
-            if response.lower() != "y":
-                print("Aborted.")
-                sys.exit(1)
+        _confirm_overwrite(yes, "Overwrite remote? [y/N] ")
+    elif not stored_rev and not merged:
+        # No stored revision means this file has never been pulled from or
+        # pushed to this doc — `link` alone records no revision — so the doc
+        # may be full of content the user has never seen, and the push would
+        # replace all of it. An absent revision used to be a silent bypass of
+        # the check above; it is the case that most needs one.
+        print("This file has never been pulled from or pushed to this doc, so "
+              "gdoc-sync cannot tell whether the doc holds content you have "
+              "not seen. Pushing would replace all of it.")
+        print(f"  See it first:  gdoc-sync pull {local_path}")
+        print(f"  Or compare:    gdoc-sync diff {local_path}")
+        print("  Or pass --yes to replace the document's content.")
+        _confirm_overwrite(yes, "Replace the document's content? [y/N] ")
 
     markdown = local_path.read_text()
 
@@ -189,6 +219,23 @@ def _consume_applied_markers(local_path: Path, markdown: str,
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _confirm_overwrite(yes: bool, question: str) -> None:
+    """Get consent to replace the doc's content, or exit.
+
+    Shared by the drift warning and the never-synced stop so that both answer
+    ``--yes``, a pipe and a tty the same way.
+    """
+    if yes:
+        print("  --yes given; overwriting remote.")
+        return
+    if not sys.stdin.isatty():
+        print("Refusing to overwrite non-interactively without --yes.", file=sys.stderr)
+        sys.exit(2)
+    if input(question).lower() != "y":
+        print("Aborted.")
+        sys.exit(1)
 
 
 def _guard_flatten(doc: dict, local_path: Path, flatten: bool) -> None:

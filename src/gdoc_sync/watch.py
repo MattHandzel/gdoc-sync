@@ -84,7 +84,7 @@ def watch(
     def render_for(path: Path):
         return render_doc(get_doc_id(str(path)) or "", asset_path=path)
 
-    def push_for(path: Path) -> str | None:
+    def push_for(path: Path, *, expected_fingerprint: str | None = None) -> str | None:
         # The engine only pushes content it has already merged, so the CLI's
         # interactive overwrite prompt would be asking a question that has
         # been answered — and there is no tty here to answer it.
@@ -101,8 +101,10 @@ def watch(
         # markers — so hand it back for the engine's local baseline.
         if json_lines:
             with contextlib.redirect_stdout(sys.stderr):
-                return push_file(path, yes=True, merged=True)
-        return push_file(path, yes=True, merged=True)
+                return push_file(path, yes=True, merged=True,
+                                 expected_fingerprint=expected_fingerprint)
+        return push_file(path, yes=True, merged=True,
+                         expected_fingerprint=expected_fingerprint)
 
     tracked: dict[Path, dict] = {}
     for p in paths:

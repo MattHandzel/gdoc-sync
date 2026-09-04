@@ -199,7 +199,12 @@ def create_doc(
 
     if save_mapping:
         try:
-            set_doc_id(str(local_path), doc_id)
+            # Store the new doc's revision alongside the mapping. Without it
+            # the file looks to `push` exactly like one that was only ever
+            # `link`ed — never pulled, never pushed — and the first push
+            # after a create would stop and ask whether to replace a document
+            # it had itself just written.
+            set_doc_id(str(local_path), doc_id, _revision_of(docs_service, doc_id))
             print(f"  Mapped {local_path.name} → {doc_id[:12]}...")
             # The file and the brand-new doc agree right now, which is the one
             # moment a merge ancestor can be recorded for free. Without it the
@@ -226,3 +231,18 @@ def create_doc(
             print(f"  Warning: could not open browser: {e}")
 
     return url
+
+
+def _revision_of(docs_service, doc_id: str) -> str:
+    """The doc's current revisionId, or "" if it cannot be read.
+
+    Best-effort like everything else on the create path: an unreadable
+    revision costs one confirmation on the first push, and must not turn a
+    successful create into an error.
+    """
+    try:
+        return docs_service.documents().get(
+            documentId=doc_id, fields="revisionId"
+        ).execute(num_retries=NUM_RETRIES).get("revisionId", "")
+    except Exception:  # noqa: BLE001
+        return ""

@@ -74,7 +74,7 @@ def test_uneventful_ticks_stay_silent(capsys, action, monkeypatch):
                         lambda *a, **k: SyncOutcome(action, "nothing happened"))
     t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
     watch._tick(Path("/tmp/note.md"), t, None, False, False, True,
-                lambda p: None, lambda p: None)
+                lambda p, **kw: None, lambda p, **kw: None)
     assert capsys.readouterr().out == ""
 
 
@@ -84,7 +84,7 @@ def test_real_events_are_reported(capsys, action, monkeypatch):
                         lambda *a, **k: SyncOutcome(action, "something happened"))
     t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
     watch._tick(Path("/tmp/note.md"), t, None, False, False, True,
-                lambda p: None, lambda p: None)
+                lambda p, **kw: None, lambda p, **kw: None)
     assert json.loads(capsys.readouterr().out.strip())["event"] == action
 
 
@@ -96,7 +96,7 @@ def test_tick_records_a_new_revision(monkeypatch, tmp_path):
     path.write_text("x")
     t = {"doc_id": "d", "rev": "rev-1", "fails": 0, "skip": 0, "one_way": False}
 
-    watch._tick(path, t, None, False, False, True, lambda p: None, lambda p: None)
+    watch._tick(path, t, None, False, False, True, lambda p, **kw: None, lambda p, **kw: None)
 
     assert t["rev"] == "rev-99"
     assert config.get_revision(str(path)) == "rev-99"
@@ -121,7 +121,7 @@ def test_pull_only_file_is_never_pushed(monkeypatch, tmp_path, one_way, no_push,
     path.write_text("x")
     t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": one_way}
 
-    watch._tick(path, t, None, no_push, False, True, lambda p: None, lambda p: None)
+    watch._tick(path, t, None, no_push, False, True, lambda p, **kw: None, lambda p, **kw: None)
 
     assert seen["allow_push"] is expected
 
@@ -138,7 +138,7 @@ def test_an_exception_does_not_kill_the_watcher(capsys, monkeypatch):
     t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
 
     watch._safe_tick(Path("/tmp/note.md"), t, None, False, False, True,
-                     lambda p: None, lambda p: None)
+                     lambda p, **kw: None, lambda p, **kw: None)
 
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["event"] == "error"
@@ -154,7 +154,7 @@ def test_systemexit_from_push_is_caught(capsys, monkeypatch):
     monkeypatch.setattr(watch, "reconcile", bail)
     t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
     watch._safe_tick(Path("/tmp/note.md"), t, None, False, False, True,
-                     lambda p: None, lambda p: None)
+                     lambda p, **kw: None, lambda p, **kw: None)
     assert json.loads(capsys.readouterr().out.strip())["event"] == "error"
 
 
@@ -165,7 +165,7 @@ def test_repeated_failures_back_off(capsys, monkeypatch):
 
     for _ in range(5):
         watch._safe_tick(Path("/tmp/note.md"), t, None, False, False, True,
-                         lambda p: None, lambda p: None)
+                         lambda p, **kw: None, lambda p, **kw: None)
 
     capsys.readouterr()
     assert t["skip"] > 0, "a persistently failing file should stop being retried every tick"
@@ -185,5 +185,5 @@ def test_a_success_clears_the_backoff(monkeypatch):
     t = {"doc_id": "d", "rev": "r", "fails": 0, "skip": 0, "one_way": False}
     for _ in range(3):
         watch._safe_tick(Path("/tmp/note.md"), t, None, False, False, True,
-                         lambda p: None, lambda p: None)
+                         lambda p, **kw: None, lambda p, **kw: None)
     assert t["fails"] == 0

@@ -53,7 +53,7 @@ def harness(tmp_path, monkeypatch, capsys):
     """A linked file plus the fakes ``push`` will talk to."""
     path = tmp_path / "note.md"
     path.write_text(authored_file())
-    config.set_doc_id(path, "doc-1")
+    config.set_doc_id(path, "doc-1", revision_id="rev-1")
 
     drive = FakeDrive([_remote("Alice", "tighten this")])
     docs = FakeDocs()
@@ -162,7 +162,7 @@ def test_push_without_markers_still_warns_and_lists_once(tmp_path, monkeypatch,
                                                         capsys):
     path = tmp_path / "plain.md"
     path.write_text("# Title\n\nquoted words are here.\n")
-    config.set_doc_id(path, "doc-1")
+    config.set_doc_id(path, "doc-1", revision_id="rev-1")
 
     from gdoc_sync import sync
 
