@@ -12,6 +12,9 @@ from pathlib import Path
 
 from .callouts import rewrite_for_pandoc, transform_ast
 
+#: A ``# [TAB] Title`` heading, which names a tab rather than the document.
+TAB_MARKER = re.compile(r"^#{1,6}[ \t]+\[TAB\]")
+
 
 def strip_frontmatter(markdown: str) -> str:
     """Remove a leading YAML frontmatter block if present."""
@@ -28,6 +31,10 @@ def derive_title(markdown_with_frontmatter: str, fallback: str) -> str:
     for line in body.splitlines():
         stripped = line.strip()
         if stripped.startswith("# "):
+            # In a tabbed file every top-level heading is a tab marker, and
+            # "[TAB] Overview" is nobody's idea of a document title.
+            if TAB_MARKER.match(stripped):
+                continue
             return stripped[2:].strip()
     if markdown_with_frontmatter.startswith("---\n"):
         end_idx = markdown_with_frontmatter.find("\n---\n", 4)
@@ -240,6 +247,25 @@ def pandoc_to_docx(markdown_body: str, output_path: Path,
     for formula in unconvertible_math(proc.stderr):
         print(f"  Note: {formula} is not valid LaTeX — it will appear in the "
               f"doc as literal text, not a formula.")
+
+
+def pandoc_to_ast(markdown_body: str, resource_dir: Path | None = None) -> dict:
+    """Parse markdown into pandoc's JSON AST, with callouts already folded.
+
+    The same front half of :func:`pandoc_to_docx` — table normalisation,
+    callout rewriting, the identical reader and extensions — stopping one step
+    earlier. Content bound for a *tab* cannot go through the docx writer at all
+    (Drive's importer replaces a whole document and cannot address a tab), so
+    :mod:`.mdrequests` compiles this AST into Docs API requests instead. Both
+    paths therefore agree about what the markdown means.
+    """
+    markdown_body = ensure_table_blank_lines(markdown_body)
+    markdown_body, n_callouts = rewrite_for_pandoc(markdown_body)
+    cwd = str(resource_dir) if resource_dir else None
+    proc = _run_pandoc(["-f", "gfm+yaml_metadata_block", "-t", "json"],
+                       markdown_body, cwd)
+    ast = json.loads(proc.stdout)
+    return transform_ast(ast) if n_callouts else ast
 
 
 _MATH_WARNING = re.compile(r"^\[WARNING\] Could not convert TeX math (.*), rendering as TeX:",

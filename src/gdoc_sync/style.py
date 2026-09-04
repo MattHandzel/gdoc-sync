@@ -17,6 +17,7 @@ from __future__ import annotations
 from googleapiclient.errors import HttpError
 
 from .callouts import table_callout
+from .convert import _is_mono
 from .services import NUM_RETRIES
 
 # ---------------------------------------------------------------------------
@@ -315,6 +316,7 @@ def style_requests(doc: dict, *, font: str | None = None,
 
     # Collect ranges that need per-run treatment.
     bold_ranges: list[tuple[int, int]] = []
+    mono_ranges: list[tuple[int, int, str]] = []  # (s, e, the run's own family)
     heading_ranges: list[tuple[int, int, str]] = []  # (s, e, named-style)
     link_ranges: list[tuple[int, int]] = []
     headings_map = palette.get("headings", {}) if palette else {}
@@ -325,6 +327,14 @@ def style_requests(doc: dict, *, font: str | None = None,
         style = r["textRun"].get("textStyle", {})
         if font and style.get("bold"):
             bold_ranges.append((s, e))
+        if font and _is_mono(style):
+            # A monospace run is a fenced code block or an inline code span,
+            # and the font is the ONLY thing that says so — the puller reads
+            # code back by looking for it (see convert._is_code_paragraph).
+            # Letting the document-wide font sweep over it turns every fence
+            # in the document into ordinary prose on the next pull.
+            mono_ranges.append(
+                (s, e, style["weightedFontFamily"]["fontFamily"]))
         if palette and named in headings_map:
             heading_ranges.append((s, e, named))
         if palette and style.get("link"):
@@ -342,6 +352,18 @@ def style_requests(doc: dict, *, font: str | None = None,
                     "range": {"startIndex": s, "endIndex": e},
                     "textStyle": {"bold": True},
                     "fields": "bold",
+                }
+            })
+
+    # 3b. Re-assert monospace, cleared by the same font request.
+    for s, e, family in mono_ranges:
+        s, e = _clamp(s, e)
+        if e > s:
+            requests.append({
+                "updateTextStyle": {
+                    "range": {"startIndex": s, "endIndex": e},
+                    "textStyle": {"weightedFontFamily": {"fontFamily": family}},
+                    "fields": "weightedFontFamily",
                 }
             })
 
