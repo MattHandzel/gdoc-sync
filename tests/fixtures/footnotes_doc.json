@@ -1,0 +1,70 @@
+{
+  "title": "Footnotes",
+  "revisionId": "rev-1",
+  "body": {
+    "content": [
+      {
+        "startIndex": 1,
+        "endIndex": 30,
+        "paragraph": {
+          "elements": [
+            {"textRun": {"content": "Intro text", "textStyle": {}}},
+            {"footnoteReference": {"footnoteId": "kix.second", "footnoteNumber": "1", "textStyle": {}}},
+            {"textRun": {"content": " and more", "textStyle": {}}},
+            {"footnoteReference": {"footnoteId": "kix.first", "footnoteNumber": "2", "textStyle": {}}},
+            {"textRun": {"content": ".\n", "textStyle": {}}}
+          ]
+        }
+      }
+    ]
+  },
+  "footnotes": {
+    "kix.first": {
+      "footnoteId": "kix.first",
+      "content": [
+        {
+          "paragraph": {
+            "elements": [
+              {"textRun": {"content": "The ", "textStyle": {}}},
+              {"textRun": {"content": "bold", "textStyle": {"bold": true}}},
+              {"textRun": {"content": " part.\n", "textStyle": {}}}
+            ]
+          }
+        },
+        {
+          "paragraph": {
+            "elements": [
+              {"textRun": {"content": "Second paragraph of the note.\n", "textStyle": {}}}
+            ]
+          }
+        }
+      ]
+    },
+    "kix.second": {
+      "footnoteId": "kix.second",
+      "content": [
+        {
+          "paragraph": {
+            "elements": [
+              {"textRun": {"content": "A ", "textStyle": {}}},
+              {"textRun": {"content": "linked", "textStyle": {"link": {"url": "https://example.com"}}}},
+              {"textRun": {"content": " note.\n", "textStyle": {}}}
+            ]
+          }
+        }
+      ]
+    },
+    "kix.orphan": {
+      "footnoteId": "kix.orphan",
+      "content": [
+        {
+          "paragraph": {
+            "elements": [
+              {"textRun": {"content": "Nobody points at this one.\n", "textStyle": {}}}
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

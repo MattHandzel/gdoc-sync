@@ -28,16 +28,119 @@ class OffsetMapping:
         return None
 
 
-def doc_to_markdown(doc: dict, image_saver=None) -> tuple[str, OffsetMapping]:
+class _Footnotes:
+    """Footnote bookkeeping for one document (or one tab) being converted.
+
+    Google's footnote ids (``kix.a1b2c3``) carry no ordering and are not
+    stable across documents, so they are useless as markdown labels. Numbers
+    are assigned by order of FIRST reference in the body — the order a reader
+    meets them — and the same id referenced twice keeps its number.
+
+    ``start`` lets a multi-tab pull number continuously across tabs: every tab
+    carries its own ``documentTab.footnotes`` and restarting at 1 in each would
+    emit two different ``[^1]:`` definitions into one markdown file.
+
+    ``nested`` marks the state used while converting a footnote's own body. A
+    footnote reference *inside* a footnote cannot become another markdown
+    footnote (a definition cannot nest inside a definition), so it degrades to
+    the plain number Docs gave it.
+    """
+
+    def __init__(self, footnotes: dict | None = None, start: int = 1,
+                 nested: bool = False):
+        self.footnotes = footnotes or {}
+        self.start = start
+        self.nested = nested
+        self.order: list[str] = []
+
+    def label(self, footnote_id: str) -> int:
+        if footnote_id not in self.order:
+            self.order.append(footnote_id)
+        return self.start + self.order.index(footnote_id)
+
+    def numbered(self) -> list[tuple[int, str]]:
+        """``(number, footnote_id)`` for every footnote that needs a definition.
+
+        Referenced ones first, in reference order. Then the ORPHANS — ids that
+        live in the footnotes segment but that no body element points at (Docs
+        keeps a footnote's text after its reference is deleted). Their prose is
+        real content, so they get the next numbers rather than being dropped.
+        """
+        ids = list(self.order)
+        ids += [fid for fid in self.footnotes if fid not in self.order]
+        return [(self.start + i, fid) for i, fid in enumerate(ids)]
+
+
+def _footnote_marker(ref: dict, state: _Footnotes | None) -> str:
+    """The markdown for one ``footnoteReference`` paragraph element."""
+    if state is None or state.nested:
+        number = str(ref.get("footnoteNumber") or "").strip()
+        return f"[{number}]" if number else ""
+    return f"[^{state.label(ref.get('footnoteId', ''))}]"
+
+
+def _definition_block(number: int, body: str) -> str:
+    """One ``[^N]: ...`` definition, with continuation paragraphs indented.
+
+    Pandoc's (and Obsidian's, and GitHub's) rule: the first line sits on the
+    label line, every later line of the same note is indented four spaces.
+    """
+    lines = body.strip("\n").split("\n")
+    head = f"[^{number}]:"
+    if lines and lines[0].strip():
+        head += " " + lines[0]
+    rest = [("    " + line) if line.strip() else "" for line in lines[1:]]
+    return "\n".join([head, *rest]).rstrip()
+
+
+def _footnote_definitions(state: _Footnotes, lists_meta: dict,
+                          inline_objects: dict, image_saver) -> str:
+    """Render every footnote body as a markdown definition, in number order.
+
+    A footnote's body is a list of structural elements — the same shape as
+    ``body.content`` — so it converts by recursing, which is what keeps bold,
+    links, equations, lists and code inside a footnote alive.
+    """
+    blocks = []
+    for number, footnote_id in state.numbered():
+        content = state.footnotes.get(footnote_id, {}).get("content", [])
+        inner, _ = doc_to_markdown(
+            {"body": {"content": content},
+             "lists": lists_meta, "inlineObjects": inline_objects},
+            image_saver=image_saver,
+            _footnotes=_Footnotes(state.footnotes, nested=True),
+        )
+        blocks.append(_definition_block(number, inner))
+    return "\n\n".join(blocks)
+
+
+def doc_to_markdown(doc: dict, image_saver=None, *, start_number: int = 1,
+                    _footnotes: _Footnotes | None = None,
+                    ) -> tuple[str, OffsetMapping]:
     """Convert Google Docs API document JSON to markdown string + offset map.
 
     ``image_saver(object_id, content_uri) -> str | None`` downloads an inline
     image and returns the (relative) path to reference in the markdown; when
     None (default), inline images are skipped.
+
+    Footnotes live in their own ``doc["footnotes"]`` segment, referenced from
+    the body by ``footnoteReference`` elements. They are emitted as ``[^N]``
+    inline plus a block of ``[^N]: ...`` definitions at the end. Reading them
+    is not cosmetic: `push` replaces the whole body, so a pull that dropped
+    them deleted them from the document on the next push.
+
+    ``start_number`` offsets the labels, so a tabbed pull can number
+    continuously across tabs instead of emitting ``[^1]`` once per tab.
     """
     body = doc.get("body", {}).get("content", [])
     lists_meta = doc.get("lists", {})
     inline_objects = doc.get("inlineObjects", {})
+    # A nested call (a callout's cell, a footnote's own body) shares the
+    # caller's state so numbering is document-wide and the definitions are
+    # emitted once, at the very end, by the outermost call.
+    footnotes = _footnotes if _footnotes is not None else _Footnotes(
+        doc.get("footnotes"), start=start_number)
+    owns_footnotes = _footnotes is None
     md_parts: list[str] = []
     offset_map = OffsetMapping()
     md_pos = 0
@@ -83,7 +186,8 @@ def doc_to_markdown(doc: dict, image_saver=None) -> tuple[str, OffsetMapping]:
 
             prefix = _paragraph_prefix(para, lists_meta)
             text, runs_md = _convert_paragraph_elements(
-                para.get("elements", []), inline_objects, image_saver)
+                para.get("elements", []), inline_objects, image_saver,
+                footnotes)
 
             line = prefix + runs_md
             # Strip trailing newline from Google (we add our own)
@@ -120,10 +224,11 @@ def doc_to_markdown(doc: dict, image_saver=None) -> tuple[str, OffsetMapping]:
                     {"body": {"content": cell.get("content", [])},
                      "lists": lists_meta, "inlineObjects": inline_objects},
                     image_saver=image_saver,
+                    _footnotes=footnotes,
                 )
                 table_md = callout_to_markdown(spec, title, inner)
             else:
-                table_md = _convert_table(element["table"])
+                table_md = _convert_table(element["table"], footnotes)
             md_parts.append(table_md)
             md_pos += len(table_md)
 
@@ -140,7 +245,17 @@ def doc_to_markdown(doc: dict, image_saver=None) -> tuple[str, OffsetMapping]:
     # Clean up excessive blank lines
     while "\n\n\n" in result:
         result = result.replace("\n\n\n", "\n\n")
-    return result.strip() + "\n", offset_map
+    result = result.strip()
+
+    # Definitions go last, after the blank-line cleanup and the strip — both of
+    # which would otherwise chew on the four-space continuation lines.
+    if owns_footnotes:
+        definitions = _footnote_definitions(
+            footnotes, lists_meta, inline_objects, image_saver)
+        if definitions:
+            result = f"{result}\n\n{definitions}" if result else definitions
+
+    return result + "\n", offset_map
 
 
 def _paragraph_prefix(para: dict, lists_meta: dict) -> str:
@@ -237,6 +352,7 @@ def _convert_paragraph_elements(
     elements: list[dict],
     inline_objects: dict | None = None,
     image_saver=None,
+    footnotes: _Footnotes | None = None,
 ) -> tuple[str, str]:
     """Convert paragraph elements to (plain_text, markdown_text)."""
     plain_parts = []
@@ -253,6 +369,15 @@ def _convert_paragraph_elements(
             # element is skipped and the sentence silently loses its formula.
             if "equation" in elem:
                 md_parts.append(MATH_PLACEHOLDER)
+                continue
+
+            # The body only points AT a footnote; its text lives in the
+            # document's footnotes segment and is emitted as a definition by
+            # :func:`doc_to_markdown`. Falling through here (as this did) drops
+            # the marker, and `push` then deletes the footnote from the doc.
+            ref = elem.get("footnoteReference")
+            if ref is not None:
+                md_parts.append(_footnote_marker(ref, footnotes))
                 continue
 
             obj_id = elem.get("inlineObjectElement", {}).get("inlineObjectId")
@@ -313,7 +438,7 @@ def _convert_paragraph_elements(
     return "".join(plain_parts), "".join(md_parts)
 
 
-def _convert_table(table: dict) -> str:
+def _convert_table(table: dict, footnotes: _Footnotes | None = None) -> str:
     """Convert a Google Docs table to markdown pipe table."""
     rows = table.get("tableRows", [])
     if not rows:
@@ -329,7 +454,8 @@ def _convert_table(table: dict) -> str:
             for element in cell_content:
                 if "paragraph" in element:
                     elems = element["paragraph"].get("elements", [])
-                    _, cell_md = _convert_paragraph_elements(elems)
+                    _, cell_md = _convert_paragraph_elements(
+                        elems, footnotes=footnotes)
                     text += cell_md.strip()
             cell_texts.append(text.replace("|", "\\|"))
         md_rows.append("| " + " | ".join(cell_texts) + " |")

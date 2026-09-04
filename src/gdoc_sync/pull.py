@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ from .convert import doc_to_markdown, restore_fence_languages
 from .mathmd import restore_math
 from .services import NUM_RETRIES, get_services
 from .syncstate import backup_file, clear_conflict, set_bases
+
+_FOOTNOTE_DEF_RE = re.compile(r"(?m)^\[\^\d+\]:")
 
 
 def _iter_tabs(tabs, depth=0):
@@ -32,11 +35,19 @@ def _iter_tabs(tabs, depth=0):
         yield from _iter_tabs(tab.get("childTabs", []), depth + 1)
 
 
-def _tab_to_markdown(doc_tab: dict, image_saver=None) -> str:
+def _tab_to_markdown(doc_tab: dict, image_saver=None,
+                     start_number: int = 1) -> str:
+    """One tab's markdown. ``start_number`` continues footnote numbering.
+
+    Each tab carries its OWN ``documentTab.footnotes``, so numbering restarted
+    per tab would put two different ``[^1]:`` definitions in one file.
+    """
     md, _ = doc_to_markdown({"body": doc_tab.get("body", {}),
                              "lists": doc_tab.get("lists", {}),
-                             "inlineObjects": doc_tab.get("inlineObjects", {})},
-                            image_saver=image_saver)
+                             "inlineObjects": doc_tab.get("inlineObjects", {}),
+                             "footnotes": doc_tab.get("footnotes", {})},
+                            image_saver=image_saver,
+                            start_number=start_number)
     return md
 
 
@@ -144,17 +155,21 @@ def _render_body(doc, *, asset_path, local_text, say):
     say(f"Pulling: {title}" + (f"  ({len(tabs)} tabs)" if len(tabs) > 1 else ""))
 
     # Multi-tab docs get one "# [TAB] <title>" section each.
+    footnotes_in_doc = 0
     if len(tabs) > 1:
         parts = []
         for tab_title, doc_tab, depth in tabs:
             hashes = "#" * min(depth + 1, 6)
             parts.append(f"{hashes} [TAB] {tab_title}\n\n"
-                         f"{_tab_to_markdown(doc_tab, image_saver)}")
+                         f"{_tab_to_markdown(doc_tab, image_saver, footnotes_in_doc + 1)}")
+            footnotes_in_doc += len(doc_tab.get("footnotes") or {})
         markdown = "\n\n---\n\n".join(parts)
     elif tabs:
         markdown = _tab_to_markdown(tabs[0][1], image_saver)
+        footnotes_in_doc = len(tabs[0][1].get("footnotes") or {})
     else:  # no tab metadata at all — legacy top-level body
         markdown, _ = doc_to_markdown(doc, image_saver=image_saver)
+        footnotes_in_doc = len(doc.get("footnotes") or {})
 
     # Put back everything the round trip cannot carry, before anything
     # compares, merges or writes this text.
@@ -171,6 +186,16 @@ def _render_body(doc, *, asset_path, local_text, say):
                 f"expose equation contents. Check them before saving.")
         markdown = restore_fence_languages(markdown, local_text)
         markdown = restore_callout_spellings(markdown, local_text)
+
+    # Count-preservation check, same idea as the equation warning above: the
+    # next push replaces the whole body, so a footnote that did not make it
+    # into the markdown is a footnote about to be deleted from the document.
+    if footnotes_in_doc:
+        written = len(_FOOTNOTE_DEF_RE.findall(markdown))
+        if written < footnotes_in_doc:
+            say(f"  WARNING: the doc has {footnotes_in_doc} footnote(s) but "
+                f"only {written} footnote definition(s) reached the markdown "
+                f"— pushing this back would delete the missing one(s).")
 
     if image_saver is not None:
         image_saver.finish()

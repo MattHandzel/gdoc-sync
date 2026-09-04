@@ -1,0 +1,62 @@
+{
+  "title": "Tabbed footnotes",
+  "revisionId": "rev-2",
+  "tabs": [
+    {
+      "tabProperties": {"tabId": "t1", "title": "One"},
+      "documentTab": {
+        "body": {
+          "content": [
+            {
+              "startIndex": 1,
+              "endIndex": 10,
+              "paragraph": {
+                "elements": [
+                  {"textRun": {"content": "Alpha", "textStyle": {}}},
+                  {"footnoteReference": {"footnoteId": "kix.a", "footnoteNumber": "1", "textStyle": {}}},
+                  {"textRun": {"content": ".\n", "textStyle": {}}}
+                ]
+              }
+            }
+          ]
+        },
+        "footnotes": {
+          "kix.a": {
+            "footnoteId": "kix.a",
+            "content": [
+              {"paragraph": {"elements": [{"textRun": {"content": "First tab note.\n", "textStyle": {}}}]}}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "tabProperties": {"tabId": "t2", "title": "Two"},
+      "documentTab": {
+        "body": {
+          "content": [
+            {
+              "startIndex": 1,
+              "endIndex": 10,
+              "paragraph": {
+                "elements": [
+                  {"textRun": {"content": "Beta", "textStyle": {}}},
+                  {"footnoteReference": {"footnoteId": "kix.b", "footnoteNumber": "1", "textStyle": {}}},
+                  {"textRun": {"content": ".\n", "textStyle": {}}}
+                ]
+              }
+            }
+          ]
+        },
+        "footnotes": {
+          "kix.b": {
+            "footnoteId": "kix.b",
+            "content": [
+              {"paragraph": {"elements": [{"textRun": {"content": "Second tab note.\n", "textStyle": {}}}]}}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
