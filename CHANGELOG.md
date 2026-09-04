@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+### Data safety: what a persona audit found, and what is closed
+
+Nine reviewers with different jobs — a tech writer, a vault user, an academic,
+a Docs-side PM, a CI engineer, an IT-security admin, a QA lead, a first-run
+developer and a Markdown pedant — audited the tool offline and found sixteen
+ways to lose data or touch other people's. Eleven are closed here; the rest
+(anchor-preserving pushes, suggestions, default sharing, OAuth scope) need
+design decisions and are tracked separately.
+
+- **A collaborator's display name could execute an action.** A pulled comment
+  from a user named `resolve` rendered as `{>>resolve: ...<<}`, which the next
+  push ran against the nearest preceding thread — somebody else's. Names that
+  parse as actions are now quoted, and nothing a doc contains can become one.
+- **Comment actions posted again on every push.** Markers were sent to Drive
+  but never removed from the file, so three pushes of one file left three
+  identical replies. Applied markers are now consumed (the file is backed up
+  and rewritten before the upload); failed ones stay.
+- **Any local file could be uploaded to Drive world-readable** by typing
+  `![](../../.ssh/id_rsa)` into a shared doc. Image targets are now contained
+  to the note's project, hidden directories are refused, and only real image
+  bytes are staged. Staging files are tagged and stale ones reaped.
+- **A doc that rendered empty or truncated emptied the note**, as a clean
+  `merged`. A render under half the previous size is now a conflict.
+- **A note truncated to one line replaced the whole doc.** A push that would
+  shrink the doc to under 20% of its last synced size is refused without
+  `--force`.
+- **An edit typed into the doc during a merged push vanished.** The engine now
+  hands the push a text fingerprint of the doc it merged; a mismatch aborts
+  the upload and the pass is retried, with both edits intact. A push that
+  fails for any reason no longer leaves the local edit unpushed forever.
+- **`link` then `push` replaced a document you had never seen, with no
+  prompt**, because a missing stored revision bypassed the drift check. It is
+  now a hard stop: pull or diff first, or pass `--yes`. `link` also validates
+  the URL or id instead of accepting any string, and `create` records the new
+  doc's revision.
+- **Parallel `gdoc-sync` processes lost mappings.** Twenty concurrent `link`
+  calls used to leave thirteen; the state file is now written under an
+  advisory lock (`state.yaml.lock`) and every read-modify-write holds it.
+- **Footnotes were deleted on pull, then from the doc on push.** They now come
+  back as `[^n]` references and definitions, numbered in reference order, and
+  the pull warns if any went missing.
+- **Equations swapped bodies when a paragraph moved in Docs.** Equal counts
+  used to be matched by position; every equation is now matched to its
+  surrounding prose, and an unmatched one is left as a placeholder and
+  counted rather than guessed.
+- **A tabbed push cleared the tab before it was rewritten, with no copy.**
+  Each tab is snapshotted into the backup directory first; on failure the
+  backup path, the pre-push revision and the version-history link are
+  printed.
+- **A section could be written into the wrong tab** when one tab could not be
+  created. Sections are now paired to their tab ids explicitly.
+- Every push warns how many anchored comments will lose their anchor in the
+  Docs UI (they re-attach on the next pull).
+
 ### Wrong input is now an error instead of a quiet wrong result
 
 Every one of these used to exit 0 and do something plausible-looking:

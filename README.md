@@ -79,9 +79,11 @@ gdoc-sync doctor           # confirms everything is wired up
   two-way, one `# [TAB]` section per tab — see [Tabs](#tabs).
 - **push** replaces the linked doc's content in place. The doc id, URL, and
   sharing are untouched. If someone edited the doc since your last pull, you
-  get warned before overwriting (`--yes` for scripts). Reply, resolve, and
-  comment markers in the file are applied to the doc's comment threads (see
-  below). For a tabbed file each `# [TAB]` section is rewritten into its own
+  get warned before overwriting (`--yes` for scripts). A file that was only
+  ever `link`ed, never pulled or pushed, is stopped the same way: pull or diff
+  first, or pass `--yes`. Reply, resolve, and comment markers in the file are
+  applied to the doc's comment threads (see below) and then removed from the
+  file, so pushing twice never posts twice. For a tabbed file each `# [TAB]` section is rewritten into its own
   tab; `--prune-tabs` also deletes tabs your file no longer mentions, and
   `--flatten` forces the old collapse-everything-into-tab-one behaviour.
 - **pull** brings the doc back as clean Markdown, including multi-tab
@@ -89,8 +91,9 @@ gdoc-sync doctor           # confirms everything is wired up
   right after the text it anchors to. Images download to `<name>-assets/`
   (or one global `image_dir:` from the config), and an image the file already
   references keeps its own path and alt text — pulls recognise your images by
-  content, so they are never re-downloaded or renamed. Your local YAML
-  frontmatter is preserved. `--json` for scripts.
+  content, so they are never re-downloaded or renamed. Footnotes come back
+  as `[^1]` references with their definitions at the end of the file. Your
+  local YAML frontmatter is preserved. `--json` for scripts.
 - **sync** reconciles a file with its doc once: a real three-way merge, so
   edits made on both sides both survive (see [Two-way sync](#two-way-sync)).
 - **watch** is that same reconcile on a timer — live two-way sync. `--json`
@@ -170,7 +173,18 @@ A brand-new note for the doc:{>>comment: should we cite the 2025 survey?<<}
 
 On push, the reply lands on Maya's thread, Sam's thread gets resolved, and the
 new comment appears on the doc quoting your line. All `{>>...<<}` markers are
-stripped from the pushed content itself.
+stripped from the pushed content itself, and each marker that was applied is
+removed from your file (after a backup), so a second push of the same file
+posts nothing. A marker that failed or could not be matched stays put.
+
+A collaborator whose display name happens to be `reply`, `resolve` or
+`comment` is rendered quoted (`{>>"resolve": ...<<}`) so nothing a doc
+contains can ever be executed as one of your actions.
+
+Every push also warns how many anchored comments are about to lose their
+anchor: both push paths replace the body, so Google Docs shows those threads
+as "Original content deleted" until the next pull re-attaches them. The
+threads themselves survive in the doc.
 
 ## Two-way sync
 
@@ -217,9 +231,19 @@ gdoc-sync restore notes.md --index 0    # bring the newest one back
 **When it refuses to act.** With no stored snapshot and two sides that already
 differ, there is no safe merge base and the engine will not guess — run
 `gdoc-sync diff`, then `sync --adopt-local` (push yours) or `--adopt-remote`
-(take the doc's). It also refuses to push an emptied file over a doc that has
-content (`--force` overrides), and abandons a merge if the file changes
-underneath it mid-sync.
+(take the doc's). It also refuses, as a conflict:
+
+- to push a file that shrank to under 20% of its last synced size — a
+  truncated note, a crashed editor — over a doc that has content
+  (`--force` overrides);
+- to merge a doc that rendered to under half of what it rendered to last
+  time — a select-all-delete caught mid-poll, a partial fetch — into your
+  file (`--adopt-remote` accepts the shrink).
+
+And it abandons a pass, to retry on the next one, if the file changes
+underneath it mid-sync or if the doc's text changed between the render it
+merged and the upload — so an edit typed into the doc during that window is
+merged next time instead of overwritten.
 
 ## Configuration
 
@@ -256,7 +280,8 @@ themes:
     heading_color: "#7c2d12"
 
 # Optional: keep sync state (the file-to-doc mappings) somewhere synced or
-# versioned. Default: ~/.local/state/gdoc-sync/state.yaml
+# versioned. Default: ~/.local/state/gdoc-sync/state.yaml. A sibling
+# state.yaml.lock file serialises concurrent writers; leave it out of git.
 # state_file: ~/notes/.gdoc-sync-state.yaml
 ```
 
@@ -382,8 +407,18 @@ indentation stops at the first bullet.
   third-party tool can highlight-comment a text range. That's why
   `{>>comment: ...<<}` becomes a doc-level comment quoting your text, while
   replies and resolves (which the API supports) attach to the real thread.
-- Push replaces the whole doc body. Comments survive it; suggested-edit
-  history doesn't.
+- **Push replaces the whole doc body.** Comment threads survive it but lose
+  their anchor in the Docs UI until the next pull (the push tells you how
+  many). Suggested edits are not seen at all: a pull renders them as if
+  accepted, so a doc with open suggestions is best marked `--pull-only`
+  until that is fixed.
+- **Local images must live inside the note's project.** An image target is
+  only uploaded if it resolves inside the nearest `.git` or `.obsidian`
+  ancestor of the note (else the note's own folder), is not under a hidden
+  directory, and actually starts with PNG/JPEG/GIF/WebP/BMP bytes. Anything
+  else — `../../.ssh/id_rsa` typed into a shared doc, say — is refused with a
+  warning and its alt text is written instead. The docx path refuses the
+  whole push and names the offending targets.
 - **Inside a tab, footnotes and equations degrade.** The Docs API has no
   request that creates either one in a tab, so a footnote is inlined in square
   brackets and an equation is written as visible LaTeX. Everything else about
