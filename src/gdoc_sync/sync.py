@@ -231,8 +231,8 @@ def _reconcile(
             set_conflict(path, guard)
             return SyncOutcome(CONFLICT, guard, conflicted=True)
         say(f"  local changed → pushing {path.name}")
-        push(path)
-        _refresh_after_push(path, local, render, say)
+        pushed_text = push(path)
+        _refresh_after_push(path, local, render, say, pushed_text)
         return SyncOutcome(PUSHED, "pushed local changes", pushed=True)
 
     # Remote moved. Replay the doc's edits onto the local file rather than
@@ -252,8 +252,8 @@ def _reconcile(
         set_bases(path, local=local, remote=remote_md)
         if local_changed and allow_push:
             say(f"  pushing local changes to {path.name}")
-            push(path)
-            _refresh_after_push(path, local, render, say)
+            pushed_text = push(path)
+            _refresh_after_push(path, local, render, say, pushed_text)
             return SyncOutcome(PUSHED, "pushed local changes", pushed=True)
         return SyncOutcome(NOOP, "remote changes already present locally")
 
@@ -270,8 +270,8 @@ def _reconcile(
 
     if local_changed and allow_push:
         say(f"  merged remote + local → pushing {path.name}")
-        push(path)
-        _refresh_after_push(path, merged.text, render, say)
+        pushed_text = push(path)
+        _refresh_after_push(path, merged.text, render, say, pushed_text)
         return SyncOutcome(
             MERGED, "merged remote and local changes, pushed",
             pushed=True, wrote_local=True, backup=outcome.backup,
@@ -338,13 +338,22 @@ def _empty_guard(local: str, base_local: str, force: bool) -> str:
     )
 
 
-def _refresh_after_push(path: Path, local_text: str, render, say) -> None:
+def _refresh_after_push(path: Path, local_text: str, render, say,
+                        pushed_text: str | None = None) -> None:
     """Re-anchor the ancestors on what the doc actually says after a push.
 
     A push rewrites the doc, so without this the very next pass would see the
     doc's new revision as an unexplained remote edit and merge against a stale
     ancestor.
+
+    ``pushed_text`` is what ``push`` reports it actually sent, which differs
+    from ``local_text`` when the push consumed comment-action markers out of
+    the file. Anchoring on the pre-push text would make those removals look
+    like an unsynced local edit on the very next pass. Test doubles return
+    ``None``, so anything that is not a string falls back to ``local_text``.
     """
+    if isinstance(pushed_text, str):
+        local_text = pushed_text
     try:
         after = render(path)
         set_bases(path, local=local_text, remote=after.markdown)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 from .convert import OffsetMapping
 from .services import NUM_RETRIES
@@ -97,17 +98,66 @@ def strip_comments(markdown: str) -> str:
     return md
 
 
+# A display name is *remote, attacker-controlled text*. It lands at the very
+# front of the marker span, which is exactly where `_ACTION_RE` looks for a
+# verb — so a Google account called "resolve" would make every pulled comment
+# read as `{>>resolve: <their words><<}` and the next push would execute it
+# against somebody else's thread. Names that would parse as an action are
+# quoted so the span can never match; see `_sanitize_author`.
+_AUTHOR_ACTION_RE = re.compile(r"^\s*(?:reply|resolve|comment)\s*$", re.IGNORECASE)
+
+
+def _sanitize_author(name: str | None) -> str:
+    """Make a remote display name safe to interpolate into a marker span."""
+    cleaned = (name or "").replace("{>>", "").replace("<<}", "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return "Unknown"
+    if _AUTHOR_ACTION_RE.match(cleaned):
+        # Straight double quotes are enough: `"resolve": ok` no longer starts
+        # with a bare verb, so `_ACTION_RE` cannot match the span.
+        return f'"{cleaned}"'
+    return cleaned
+
+
+def count_anchored_comments(comments: list[dict]) -> int:
+    """How many of ``comments`` are attached to a span of the document text."""
+    return sum(
+        1 for c in comments
+        if (c.get("quotedFileContent") or {}).get("value")
+    )
+
+
+def anchored_push_warning(comments: list[dict]) -> str | None:
+    """Warn that a whole-body push will detach every anchored comment.
+
+    Both push paths replace the document's content, so Google Docs shows
+    "Original content deleted" on every text-anchored thread afterwards. The
+    threads themselves survive in Drive and re-attach on the next pull, so
+    this is a warning and not a refusal — the real fix is a paragraph-level
+    diff push.
+    """
+    n = count_anchored_comments(comments)
+    if not n:
+        return None
+    return (
+        f"Warning: {n} anchored comment(s) will lose their anchor in Google "
+        "Docs after this push (they stay in the comments panel and re-attach "
+        "on the next pull)."
+    )
+
+
 def _format_comment(author: str, content: str, replies: list[dict]) -> str:
     """Format a comment + replies as CriticMarkup."""
     # Sanitize content (no newlines, no CriticMarkup delimiters)
     content = content.replace("\n", " ").replace("{>>", "").replace("<<}", "")
-    parts = [f"{author}: {content}"]
+    parts = [f"{_sanitize_author(author)}: {content}"]
 
     for reply in replies:
         r_author = reply.get("author", {}).get("displayName", "Unknown")
         r_content = reply.get("content", "").replace("\n", " ")
         r_content = r_content.replace("{>>", "").replace("<<}", "")
-        parts.append(f"{r_author}: {r_content}")
+        parts.append(f"{_sanitize_author(r_author)}: {r_content}")
 
     return "{>>" + " | ".join(parts) + "<<}"
 
@@ -167,7 +217,9 @@ def parse_comment_actions(markdown: str) -> list[dict]:
     """Extract action markers, each bound to the nearest preceding pulled comment.
 
     Returns dicts: {type, text, target (inner text of the pulled comment the
-    action applies to, or None), context (preceding line, for new comments)}.
+    action applies to, or None), context (preceding line, for new comments),
+    span ((start, end) offsets of the whole ``{>>...<<}`` marker, so a caller
+    that applied the action can cut it back out of the file)}.
     """
     actions = []
     last_pulled: str | None = None
@@ -190,6 +242,7 @@ def parse_comment_actions(markdown: str) -> list[dict]:
             "text": text,
             "target": last_pulled if kind in ("reply", "resolve") else None,
             "context": context,
+            "span": (m.start(), m.end()),
         })
 
     return actions
@@ -216,20 +269,50 @@ def match_comment(target_inner: str, remote_comments: list[dict]) -> dict | None
     return None
 
 
-def apply_comment_actions(drive_service, doc_id: str, markdown: str) -> list[str]:
+class CommentActionResult(NamedTuple):
+    """What one :func:`apply_comment_actions` pass did.
+
+    ``applied`` holds the ``(start, end)`` span of every marker whose API call
+    actually succeeded — and only those, so a skipped or failed action keeps
+    its marker and can be retried. ``remote`` is the comment list that was
+    fetched to resolve the actions, or ``None`` when there were no actions and
+    nothing was fetched; callers reuse it instead of listing comments twice.
+    """
+
+    lines: list[str]
+    applied: list[tuple[int, int]]
+    remote: list[dict] | None
+
+
+def consume_action_markers(markdown: str, spans: list[tuple[int, int]]) -> str:
+    """Cut the given marker spans out of ``markdown``.
+
+    Applied actions must not survive in the file: re-pushing an unchanged file
+    would otherwise post the same reply or comment again, every time.
+    """
+    for start, end in sorted(spans, reverse=True):
+        markdown = markdown[:start] + markdown[end:]
+    return markdown
+
+
+def apply_comment_actions(drive_service, doc_id: str,
+                          markdown: str) -> CommentActionResult:
     """Execute reply/resolve/comment markers found in ``markdown`` against the doc.
 
-    Returns human-readable result lines; API failures become warnings rather
-    than aborting the caller's push.
+    Returns human-readable result lines, the spans of the markers that were
+    applied, and the comment list that was fetched. API failures become
+    warnings rather than aborting the caller's push — and, because their span
+    is not reported as applied, their marker stays in the file.
     """
     from googleapiclient.errors import HttpError
 
     actions = parse_comment_actions(markdown)
     if not actions:
-        return []
+        return CommentActionResult([], [], None)
 
     remote = fetch_comments(drive_service, doc_id)
-    results = []
+    results: list[str] = []
+    applied: list[tuple[int, int]] = []
 
     for action in actions:
         try:
@@ -258,6 +341,7 @@ def apply_comment_actions(drive_service, doc_id: str, markdown: str) -> list[str
                 ).execute(num_retries=NUM_RETRIES)
                 verb = "Resolved" if action["type"] == "resolve" else "Replied to"
                 results.append(f"{verb}: {action['target'][:60]}")
+                applied.append(action["span"])
 
             elif action["type"] == "comment":
                 if not action["text"]:
@@ -270,7 +354,8 @@ def apply_comment_actions(drive_service, doc_id: str, markdown: str) -> list[str
                     fileId=doc_id, body={"content": content}, fields="id",
                 ).execute(num_retries=NUM_RETRIES)
                 results.append(f"New doc-level comment: {action['text'][:60]}")
+                applied.append(action["span"])
         except HttpError as e:
             results.append(f"Warning: comment action failed ({action['type']}): {e}")
 
-    return results
+    return CommentActionResult(results, applied, remote)

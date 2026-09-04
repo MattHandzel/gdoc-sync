@@ -84,7 +84,7 @@ def watch(
     def render_for(path: Path):
         return render_doc(get_doc_id(str(path)) or "", asset_path=path)
 
-    def push_for(path: Path) -> None:
+    def push_for(path: Path) -> str | None:
         # The engine only pushes content it has already merged, so the CLI's
         # interactive overwrite prompt would be asking a question that has
         # been answered — and there is no tty here to answer it.
@@ -95,11 +95,14 @@ def watch(
         # events, so send them to stderr instead: consumers get a clean
         # one-JSON-object-per-line stdout and the narration is still there for
         # anyone watching the log.
+        #
+        # The return value is the text push actually sent — it differs from
+        # the file the engine handed over when the push consumed comment-action
+        # markers — so hand it back for the engine's local baseline.
         if json_lines:
             with contextlib.redirect_stdout(sys.stderr):
-                push_file(path, yes=True, merged=True)
-        else:
-            push_file(path, yes=True, merged=True)
+                return push_file(path, yes=True, merged=True)
+        return push_file(path, yes=True, merged=True)
 
     tracked: dict[Path, dict] = {}
     for p in paths:
