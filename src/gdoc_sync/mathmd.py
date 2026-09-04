@@ -191,12 +191,22 @@ def restore_math(markdown: str, existing: str) -> tuple[str, int]:
     Returns ``(text, unrestored)`` — the count is how many placeholders had no
     local counterpart, which the caller reports so a lossy pull is never quiet.
 
-    When both sides have the same number of equations, they are matched
-    positionally: nothing was added or removed remotely, so the Nth equation in
-    the doc is certainly the Nth in the file. Otherwise the two sequences are
-    aligned on the prose surrounding each equation, so that one equation added
-    in Docs costs *that* equation's LaTeX rather than every equation's — which
-    is what a plain count check would do.
+    Position alone is never trusted, even when both sides hold the same number
+    of equations. It is tempting: if nothing was added or removed remotely then
+    the Nth equation in the doc looks like the Nth in the file. But a reviewer
+    who drags a paragraph up the page, or swaps two sentences, moves equations
+    without changing how many there are — and a positional match then writes
+    ``E = mc^2`` into the sentence about the force law and reports nothing
+    lost. That is the one failure mode this module must not have: a silent swap
+    reads as a perfectly good pull right up until someone trusts the formula.
+
+    So both sides are always aligned on the prose surrounding each equation
+    (:func:`_align`), which is also what keeps one equation added in Docs
+    costing *that* equation's LaTeX rather than every equation's. Where the
+    alignment pairs an equation, its pairing wins. Where it cannot, the Nth-for
+    -Nth candidate is offered under :func:`_fill_positionally`'s guards, and
+    when those refuse it the placeholder simply stays and is counted — a
+    visible gap the pull warns about, rather than a plausible-looking lie.
     """
     placeholders = list(_PLACEHOLDER_RE.finditer(markdown))
     if not placeholders:
@@ -206,24 +216,27 @@ def restore_math(markdown: str, existing: str) -> tuple[str, int]:
     if not spans:
         return markdown, len(placeholders)
 
+    # Not every equation in the doc became a placeholder. LaTeX that pandoc
+    # cannot parse is written into the docx as literal text, so it comes back
+    # as a readable `$...$` rather than an equation — and the local file still
+    # has a math span facing it. Counting those too is what keeps a single
+    # malformed formula from unmatching the whole paragraph around it.
+    normalised, is_placeholder = _normalise_pulled(markdown)
+    aligned = _align(normalised, _placeholderise(existing, spans))
+    pairs, nth = {}, 0
+    for position, placeholder in enumerate(is_placeholder):
+        if not placeholder:
+            continue
+        if position in aligned:
+            pairs[nth] = aligned[position]
+        nth += 1
+
     if len(spans) == len(placeholders):
-        pairs = {i: i for i in range(len(placeholders))}
-    else:
-        # Not every equation in the doc became a placeholder. LaTeX that
-        # pandoc cannot parse is written into the docx as literal text, so it
-        # comes back as a readable `$...$` rather than an equation — and the
-        # local file still has a math span facing it. Counting those too is
-        # what keeps a single malformed formula from unmatching the whole
-        # paragraph around it.
-        normalised, is_placeholder = _normalise_pulled(markdown)
-        aligned = _align(normalised, _placeholderise(existing, spans))
-        pairs, nth = {}, 0
-        for position, placeholder in enumerate(is_placeholder):
-            if not placeholder:
-                continue
-            if position in aligned:
-                pairs[nth] = aligned[position]
-            nth += 1
+        # Equal counts are what make an Nth-for-Nth guess meaningful at all:
+        # placeholder N and span N are the same ordinal in two sequences of the
+        # same length. With the counts unequal there is no such candidate, and
+        # the alignment's answer stands as it is.
+        _fill_positionally(pairs, len(placeholders))
 
     out, cursor, unrestored = [], 0, 0
     for idx, m in enumerate(placeholders):
@@ -236,6 +249,43 @@ def restore_math(markdown: str, existing: str) -> tuple[str, int]:
         cursor = m.end()
     out.append(markdown[cursor:])
     return "".join(out), unrestored
+
+
+def _fill_positionally(pairs: dict[int, int], count: int) -> None:
+    """Offer placeholder N the Nth local equation, but only where it is safe.
+
+    This runs on what the prose alignment could not place. Three guards stand
+    between it and the swap it exists to prevent:
+
+    * **Evidence.** If the alignment paired nothing at all, the two texts have
+      no recognisable prose in common and their equation *order* is not
+      evidence either — position would be the only reason to believe the
+      pairing, which is exactly the reasoning that produced the bug. Nothing is
+      filled.
+    * **Unclaimed.** A local equation the alignment already handed to another
+      placeholder is spoken for; taking it again is the swap itself, seen from
+      the other side.
+    * **Monotonic.** The fill must keep the whole mapping strictly increasing
+      on both sides. An equation that sits after an aligned pair in the doc
+      cannot come from before that pair in the file — text does not cross over
+      itself — so a candidate outside its neighbours' bracket is a move the
+      alignment already told us about, not a coincidence.
+
+    Anything that fails a guard is left alone, and :func:`restore_math` counts
+    it. The caller turns that count into a warning, so the reviewer's move
+    costs one visible placeholder instead of a wrong formula.
+    """
+    if not pairs:
+        return
+    claimed = set(pairs.values())
+    for idx in range(count):
+        if idx in pairs or idx in claimed:
+            continue
+        before = max((local for pulled, local in pairs.items() if pulled < idx), default=-1)
+        after = min((local for pulled, local in pairs.items() if pulled > idx), default=count)
+        if before < idx < after:
+            pairs[idx] = idx
+            claimed.add(idx)
 
 
 def _placeholderise(existing: str, spans: list[MathSpan]) -> str:
@@ -317,19 +367,84 @@ def _align(pulled: str, local: str) -> dict[int, int]:
     Scoping each decision this narrowly keeps damage local: a whole-document
     count check fails an entire file over a single added equation, whereas here
     it costs only the paragraph that changed.
+
+    One thing a diff cannot see is a **move**. ``difflib`` reports a longest
+    common subsequence, so of two paragraphs a reviewer swapped it can only
+    keep one — the other reads as a deletion and an insertion, and its equation
+    would go unpaired even though the paragraph is sitting right there,
+    verbatim. So after the diff, paragraphs it left over are matched by
+    identity: same collapsed text, appearing exactly once unpaired on each
+    side. Uniqueness is the whole safeguard, and it is why this pass is
+    restricted to paragraphs that actually carry an equation — two identical
+    sentences on a side prove nothing about which one moved, so neither is
+    matched.
     """
     a, b = _paragraphs(pulled), _paragraphs(local)
-    matcher = difflib.SequenceMatcher(
-        a=[text for text, _ in a], b=[text for text, _ in b], autojunk=False)
+    a_text = [text for text, _ in a]
+    b_text = [text for text, _ in b]
+    if a_text == b_text:
+        # The overwhelmingly common pull: prose the reviewer left alone, or
+        # edited somewhere with no equation near it. Every paragraph faces its
+        # counterpart, so the diff can only agree, and equations pair off in
+        # order. Skipping it keeps the ordinary case a linear scan.
+        return {n: n for n in range(sum(len(equations) for _, equations in a))}
 
-    pairs: dict[int, int] = {}
+    matcher = difflib.SequenceMatcher(a=a_text, b=b_text, autojunk=False)
+
+    matched: list[tuple[int, int]] = []
+    gaps: list[tuple[list[int], list[int]]] = []
     a_at = b_at = 0
     for block in matcher.get_matching_blocks():  # ends with a zero-size sentinel
-        _map_equal_counts(pairs, a[a_at:block.a], b[b_at:block.b])
-        for offset in range(block.size):
-            _map_equal_counts(pairs, [a[block.a + offset]], [b[block.b + offset]])
+        gaps.append((list(range(a_at, block.a)), list(range(b_at, block.b))))
+        matched += [(block.a + offset, block.b + offset) for offset in range(block.size)]
         a_at, b_at = block.a + block.size, block.b + block.size
+
+    moved = _moved_paragraphs(a, b, gaps)
+    pairs: dict[int, int] = {}
+    for a_ix, b_ix in matched + moved:
+        _map_equal_counts(pairs, [a[a_ix]], [b[b_ix]])
+
+    # A moved paragraph is accounted for, so it must not also be counted as
+    # part of the region it was left in — that region's equation counts are
+    # evidence about what is *still* unexplained.
+    moved_a = {a_ix for a_ix, _ in moved}
+    moved_b = {b_ix for _, b_ix in moved}
+    for a_range, b_range in gaps:
+        _map_equal_counts(
+            pairs,
+            [a[i] for i in a_range if i not in moved_a],
+            [b[j] for j in b_range if j not in moved_b],
+        )
     return pairs
+
+
+def _moved_paragraphs(
+    a: list[tuple[str, list[int]]],
+    b: list[tuple[str, list[int]]],
+    gaps: list[tuple[list[int], list[int]]],
+) -> list[tuple[int, int]]:
+    """Pair equation-bearing paragraphs the diff dropped but that are verbatim.
+
+    Only a paragraph whose collapsed text appears exactly once among the
+    leftovers on *each* side is paired: one unambiguous origin and one
+    unambiguous destination. Ambiguity is left to the caller's region rule,
+    which refuses to guess when the counts disagree.
+    """
+    a_by_text: dict[str, list[int]] = {}
+    b_by_text: dict[str, list[int]] = {}
+    for a_range, b_range in gaps:
+        for i in a_range:
+            text, equations = a[i]
+            if text and equations:
+                a_by_text.setdefault(text, []).append(i)
+        for j in b_range:
+            text, equations = b[j]
+            if text and equations:
+                b_by_text.setdefault(text, []).append(j)
+
+    return [(a_ix[0], b_by_text[text][0])
+            for text, a_ix in a_by_text.items()
+            if len(a_ix) == 1 and len(b_by_text.get(text, ())) == 1]
 
 
 def _map_equal_counts(

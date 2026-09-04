@@ -141,6 +141,128 @@ def test_equation_added_remotely_costs_only_itself():
     assert out.count(PLACEHOLDER) == 1
 
 
+# --------------------------------------------------------------------------
+# Equal counts are not proof of equal positions (P0-14)
+#
+# The pull used to match equations by ordinal whenever the doc and the file
+# held the same number of them. Reordering prose in Docs keeps that number
+# exactly the same, so a reviewer who dragged a paragraph up the page got each
+# formula rewritten into somebody else's sentence, with `unrestored=0` — the
+# corruption every one of these guards.
+# --------------------------------------------------------------------------
+
+def test_swapped_paragraphs_keep_each_equation_with_its_prose():
+    local = ("The force law states that $F = ma$.\n\n"
+             "The energy relation is $E = mc^2$.\n")
+    pulled = (f"The energy relation is {PLACEHOLDER}.\n\n"
+              f"The force law states that {PLACEHOLDER}.\n")
+
+    out, lost = restore_math(pulled, local)
+
+    assert out == ("The energy relation is $E = mc^2$.\n\n"
+                   "The force law states that $F = ma$.\n")
+    assert lost == 0
+
+
+def test_swapped_and_edited_paragraph_is_flagged_rather_than_swapped():
+    """The moved paragraph was also reworded, so identity cannot recover it.
+
+    The paragraph that did survive verbatim claims its own equation, which
+    leaves the other placeholder facing an already-spoken-for candidate. The
+    guard refuses it: an obvious gap the pull reports beats `$F = ma$` quietly
+    becoming the energy relation.
+    """
+    local = ("The force law states that $F = ma$.\n\n"
+             "The energy relation is $E = mc^2$.\n")
+    pulled = (f"The energy relation here is {PLACEHOLDER}.\n\n"
+              f"The force law states that {PLACEHOLDER}.\n")
+
+    out, lost = restore_math(pulled, local)
+
+    assert out == (f"The energy relation here is {PLACEHOLDER}.\n\n"
+                   "The force law states that $F = ma$.\n")
+    assert lost == 1
+    assert "$E = mc^2$" not in out
+
+
+def test_edit_far_from_the_equations_still_restores_all_of_them():
+    """The common case must stay lossless — caution is not an excuse to warn."""
+    local = ("First $a$ line.\n\n"
+             "An unrelated paragraph of prose.\n\n"
+             "Second $b$ line.\n")
+    pulled = (f"First {PLACEHOLDER} line.\n\n"
+              "An unrelated paragraph of prose, lightly reworded.\n\n"
+              f"Second {PLACEHOLDER} line.\n")
+
+    out, lost = restore_math(pulled, local)
+
+    assert out == ("First $a$ line.\n\n"
+                   "An unrelated paragraph of prose, lightly reworded.\n\n"
+                   "Second $b$ line.\n")
+    assert lost == 0
+
+
+def test_unrecognisable_prose_leaves_placeholders_instead_of_guessing():
+    """Same equation count, but nothing around them survived to match on.
+
+    Both formulas ended up in one rewritten paragraph, so no region of the
+    document holds the same number on both sides and the alignment pairs
+    nothing. With no evidence at all, ordinal position is not evidence either.
+    """
+    local = ("An untouched opening paragraph.\n\n"
+             "Alpha alpha alpha $a$.\n\n"
+             "An untouched closing paragraph.\n\n"
+             "Beta beta beta $b$.\n")
+    pulled = ("An untouched opening paragraph.\n\n"
+              f"Nothing here resembles the source {PLACEHOLDER} at all {PLACEHOLDER}.\n\n"
+              "An untouched closing paragraph.\n")
+
+    out, lost = restore_math(pulled, local)
+
+    assert out == pulled
+    assert lost == 2
+    assert "$a$" not in out and "$b$" not in out
+
+
+def test_three_equations_in_a_row_still_restore_in_order():
+    """No prose between them to align on — order alone has to carry it."""
+    local = ("The derivation runs $a = 1$, then $b = 2$, then $c = 3$ in one breath.\n\n"
+             "A closing paragraph.\n")
+    pulled = (f"The derivation runs {PLACEHOLDER}, then {PLACEHOLDER}, "
+              f"then {PLACEHOLDER} in one breath.\n\n"
+              "A closing paragraph, reworded.\n")
+
+    out, lost = restore_math(pulled, local)
+
+    assert out == ("The derivation runs $a = 1$, then $b = 2$, then $c = 3$ in one breath.\n\n"
+                   "A closing paragraph, reworded.\n")
+    assert lost == 0
+
+
+def test_positional_fallback_is_anchored_and_monotonic():
+    """Both halves of the fallback rule, in one document.
+
+    One paragraph survived verbatim and anchors its own equation to the local
+    third. The rewritten paragraph *before* it may take the first local
+    equation: unclaimed, and still on the correct side of the anchor. The one
+    *after* it may not — every candidate left sits before the anchor, and text
+    does not cross over itself — so it is left visible and counted.
+    """
+    local = ("Alpha alpha $a$.\n\n"
+             "Beta beta $b$.\n\n"
+             "A paragraph that survived untouched with $c$ in it.\n")
+    pulled = (f"Gibberish gibberish {PLACEHOLDER}.\n\n"
+              f"A paragraph that survived untouched with {PLACEHOLDER} in it.\n\n"
+              f"More gibberish entirely {PLACEHOLDER}.\n")
+
+    out, lost = restore_math(pulled, local)
+
+    assert out == ("Gibberish gibberish $a$.\n\n"
+                   "A paragraph that survived untouched with $c$ in it.\n\n"
+                   f"More gibberish entirely {PLACEHOLDER}.\n")
+    assert lost == 1
+
+
 def test_malformed_latex_next_to_good_math_does_not_unmatch_it():
     """Pandoc writes unparseable LaTeX into the docx as literal text.
 
