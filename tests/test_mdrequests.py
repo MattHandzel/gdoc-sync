@@ -8,6 +8,10 @@ requests the way the Docs API would — insertions shift indices, and
 result is handed to the real puller.
 """
 
+import os
+import re
+import time
+
 import pytest
 
 from gdoc_sync.convert import doc_to_markdown
@@ -425,3 +429,210 @@ def test_an_unsupported_block_says_so_rather_than_vanishing():
     blocks = markdown_to_blocks("::: warning\ncontent\n:::\n")
     assert any(isinstance(b, Para) and "content" in b.runs[0].text
                for b in blocks)
+
+
+# --------------------------------------------------------------------------
+# Staging images in Drive: what ImageHost will and will not upload (P0-2)
+# --------------------------------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(64)
+
+
+def _up(relative: str) -> str:
+    """A vault-relative image target, as a note one folder down would write it."""
+    return f"..{os.sep}{relative}"
+
+
+class _Exec:
+    def __init__(self, result=None, error=None):
+        self.result, self.error = result, error
+
+    def execute(self, **_kw):
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class FakeDrive:
+    """Enough Drive to record everything a push would do, and do none of it.
+
+    ``list`` really interprets the ``q`` string it is given, so the reaper's
+    query is tested rather than trusted: a file comes back only if the query
+    asks for our staging tag, excludes trashed files, and names a createdTime
+    cutoff the file is older than.
+    """
+
+    def __init__(self, stored=(), list_error=None, undeletable=()):
+        self.stored = list(stored)
+        self.list_error = list_error
+        self.undeletable = set(undeletable)
+        self.created: list[dict] = []
+        self.shared: list[dict] = []
+        self.deleted: list[str] = []
+        self.queries: list[str] = []
+
+    # -- the googleapiclient shape ----------------------------------------
+    def files(self):
+        return self
+
+    def permissions(self):
+        return self
+
+    def create(self, body=None, media_body=None, fileId=None, fields=None):  # noqa: N803
+        if fileId is not None:                      # permissions().create
+            self.shared.append({"fileId": fileId, "body": body})
+            return _Exec({"id": "perm"})
+        self.created.append(body)
+        return _Exec({"id": f"file{len(self.created)}"})
+
+    def list(self, q=None, fields=None, pageSize=None):  # noqa: N803
+        self.queries.append(q)
+        if self.list_error is not None:
+            return _Exec(error=self.list_error)
+        return _Exec({"files": self._matching(q)})
+
+    def delete(self, fileId=None):  # noqa: N803
+        if fileId in self.undeletable:
+            return _Exec(error=RuntimeError("someone else's file"))
+        self.deleted.append(fileId)
+        return _Exec({})
+
+    def _matching(self, q):
+        if "appProperties has { key='gdoc-sync' and value='staging' }" not in q:
+            return []
+        if "trashed = false" not in q:
+            return []
+        cutoff = re.search(r"createdTime < '([^']+)'", q)
+        assert cutoff, f"the reaper must bound by age, got: {q}"
+        return [f for f in self.stored
+                if f.get("appProperties", {}).get("gdoc-sync") == "staging"
+                and not f.get("trashed")
+                and f["createdTime"] < cutoff.group(1)]
+
+
+@pytest.fixture
+def vault(tmp_path):
+    """An Obsidian vault, with a private key and an outside secret to steal."""
+    root = tmp_path / "vault"
+    (root / ".obsidian").mkdir(parents=True)
+    (root / "notes").mkdir()
+    (root / "attachments").mkdir()
+    (root / "attachments" / "logo.png").write_bytes(PNG_BYTES)
+    (root / ".ssh").mkdir()
+    (root / ".ssh" / "id_rsa").write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "secret.png").write_bytes(PNG_BYTES)
+    return root
+
+
+def _host(drive, vault, said=None):
+    from gdoc_sync.mdrequests import ImageHost
+    return ImageHost(drive, resource_dir=vault / "notes",
+                     say=(said.append if said is not None else lambda *_: None))
+
+
+@pytest.mark.parametrize("target,because", [
+    (f"..{os.sep}..{os.sep}outside{os.sep}secret.png", "outside the note's project"),
+    ("/etc/hostname", "outside the note's project"),
+    (f"..{os.sep}.ssh{os.sep}id_rsa", "hidden path"),
+    ("~/x.png", "home-directory path"),
+])
+def test_a_refused_target_makes_no_api_call_at_all(vault, target, because):
+    drive = FakeDrive()
+    said: list[str] = []
+    assert _host(drive, vault, said)(target, "alt") is None
+    assert drive.created == [] and drive.shared == [] and drive.queries == []
+    assert any(target in s and because in s for s in said)
+
+
+def test_a_symlink_out_of_the_vault_is_refused(vault):
+    os.symlink(vault.parent / "outside" / "secret.png",
+               vault / "attachments" / "innocent.png")
+    drive = FakeDrive()
+    assert _host(drive, vault)(_up("attachments/innocent.png")) is None
+    assert drive.created == []
+
+
+def test_a_text_file_named_like_an_image_is_refused(vault):
+    (vault / "attachments" / "x.png").write_text("ssh-rsa AAAAB3Nza...\n")
+    drive = FakeDrive()
+    said: list[str] = []
+    assert _host(drive, vault, said)(_up("attachments/x.png")) is None
+    assert drive.created == []
+    assert any("not a PNG, JPEG, GIF, WebP or BMP" in s for s in said)
+
+
+def test_a_missing_file_still_says_not_found(vault):
+    """The old message survives, because it means something different."""
+    said: list[str] = []
+    assert _host(FakeDrive(), vault, said)(_up("attachments/gone.png")) is None
+    assert any("image not found" in s for s in said)
+
+
+def test_a_real_vault_image_is_staged_and_tagged(vault):
+    drive = FakeDrive()
+    uri = _host(drive, vault)(_up("attachments/logo.png"))
+    assert uri == "https://drive.google.com/uc?export=download&id=file1"
+    assert len(drive.created) == 1
+    assert drive.created[0]["appProperties"] == {"gdoc-sync": "staging"}
+    assert drive.shared[0]["body"] == {"type": "anyone", "role": "reader"}
+
+
+def test_staged_images_are_deleted_again_by_cleanup(vault):
+    drive = FakeDrive()
+    host = _host(drive, vault)
+    host(_up("attachments/logo.png"))
+    host.cleanup()
+    assert drive.deleted == ["file1"]
+
+
+def test_a_remote_url_is_passed_through_without_touching_drive(vault):
+    drive = FakeDrive()
+    assert _host(drive, vault)("https://example.com/a.png") == \
+        "https://example.com/a.png"
+    assert drive.created == []
+
+
+def _stored(file_id, age_seconds, tagged=True, trashed=False):
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S",
+                          time.gmtime(time.time() - age_seconds)) + "Z"
+    entry = {"id": file_id, "createdTime": stamp, "trashed": trashed}
+    if tagged:
+        entry["appProperties"] = {"gdoc-sync": "staging"}
+    return entry
+
+
+def test_reap_orphans_deletes_only_our_stale_staging_files(vault):
+    drive = FakeDrive(stored=[
+        _stored("old-ours", 7200),
+        _stored("fresh-ours", 60),                    # a concurrent push
+        _stored("old-theirs", 7200, tagged=False),    # somebody's holiday photo
+        _stored("old-trashed", 7200, trashed=True),
+    ])
+    assert _host(drive, vault).reap_orphans() == 1
+    assert drive.deleted == ["old-ours"]
+
+
+def test_the_reaper_runs_once_before_the_first_upload_only(vault):
+    drive = FakeDrive(stored=[_stored("old-ours", 7200)])
+    host = _host(drive, vault)
+    host(_up("attachments/logo.png"))
+    host(_up("attachments/logo.png"))        # cached, no second upload
+    (vault / "attachments" / "two.png").write_bytes(PNG_BYTES)
+    host(_up("attachments/two.png"))
+    assert len(drive.queries) == 1
+    assert len(drive.created) == 2
+
+
+def test_the_reaper_never_raises_into_the_push(vault):
+    drive = FakeDrive(list_error=RuntimeError("insufficient scope"))
+    host = _host(drive, vault)
+    assert host.reap_orphans() == 0
+    assert host(_up("attachments/logo.png")) is not None   # the push carries on
+
+
+def test_an_undeletable_orphan_does_not_stop_the_others(vault):
+    drive = FakeDrive(stored=[_stored("a", 7200), _stored("b", 7200)],
+                      undeletable={"a"})
+    assert _host(drive, vault).reap_orphans() == 1
+    assert drive.deleted == ["b"]
