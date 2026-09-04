@@ -15,27 +15,46 @@ are left alone unless ``prune_tabs`` says otherwise.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 from pathlib import Path
 
 from googleapiclient.http import MediaFileUpload
 
-from .comments import apply_comment_actions, strip_comments
-from .config import get_doc_id, get_font, get_revision, get_theme, set_revision
+from .comments import (
+    anchored_push_warning,
+    apply_comment_actions,
+    consume_action_markers,
+    fetch_comments,
+    strip_comments,
+)
+from .config import (
+    atomic_write,
+    get_doc_id,
+    get_font,
+    get_revision,
+    get_theme,
+    set_revision,
+)
 from .create import DOCX_MIME
 from .highlight import highlight_theme_for
 from .mdutils import pandoc_to_docx, strip_frontmatter
 from .refdoc import styled_reference_docx
 from .services import NUM_RETRIES, get_services
 from .style import apply_document_styling
+from .syncstate import backup_file
 from .tabs import read_tabs, split_tab_sections, write_sections
 
 
 def push(local_path: Path, *, yes: bool = False, font: str | None = None,
          theme: str | None = None, merged: bool = False,
-         prune_tabs: bool = False, flatten: bool = False) -> None:
+         prune_tabs: bool = False, flatten: bool = False) -> str:
     """Push a markdown file to its linked Google Doc.
+
+    Returns the markdown that was actually pushed — the file's text with any
+    comment-action markers this push consumed removed — so the caller can use
+    it as the local sync baseline instead of the pre-push text.
 
     ``merged`` says the caller is the sync engine and has already merged the
     doc's changes into this file. The drift warning below is then not just
@@ -81,8 +100,25 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
 
     # {>>reply: ...<<} / {>>resolve<<} / {>>comment: ...<<} markers sync back
     # to the doc's comment threads before being stripped from the content.
-    for line in apply_comment_actions(drive_service, doc_id, markdown):
+    result = apply_comment_actions(drive_service, doc_id, markdown)
+    for line in result.lines:
         print(f"  {line}")
+
+    # An applied marker must not survive in the file: three pushes of an
+    # unchanged file would otherwise post the same reply three times. Rewrite
+    # *before* the upload, so a failed upload cannot leave the actions
+    # queued up to fire again.
+    markdown = _consume_applied_markers(local_path, markdown, result.applied)
+
+    # Both push paths replace the whole body, so every text-anchored thread
+    # is about to read "Original content deleted" in Docs. Reuse the fetch
+    # apply_comment_actions already made rather than listing comments twice.
+    remote_comments = result.remote
+    if remote_comments is None:
+        remote_comments = fetch_comments(drive_service, doc_id)
+    anchored = anchored_push_warning(remote_comments)
+    if anchored:
+        print(f"  {anchored}")
 
     body_md = strip_comments(strip_frontmatter(markdown))
 
@@ -117,6 +153,42 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
         record_sync_baseline(local_path, doc_id, markdown)
 
     print("  Pushed successfully.")
+    return markdown
+
+
+def _consume_applied_markers(local_path: Path, markdown: str,
+                             applied: list[tuple[int, int]]) -> str:
+    """Remove the action markers that were applied, and save the file.
+
+    Only rewrites when the bytes on disk are still exactly what this push
+    read; if the user (or the watcher) saved in between, the markers are left
+    alone rather than clobbering the newer file. Returns the text that should
+    be pushed and recorded as the baseline.
+    """
+    if not applied:
+        return markdown
+
+    try:
+        on_disk = local_path.read_text()
+    except OSError as e:
+        print(f"  Warning: could not re-read {local_path.name} ({e}); "
+              "comment action markers left in place.")
+        return markdown
+
+    if _digest(on_disk) != _digest(markdown):
+        print(f"  Warning: {local_path.name} changed while this push was "
+              "running; comment action markers left in place (they will be "
+              "re-applied on the next push).")
+        return markdown
+
+    consumed = consume_action_markers(markdown, applied)
+    backup_file(local_path, tag="pre-push")
+    atomic_write(local_path, consumed)
+    return consumed
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _guard_flatten(doc: dict, local_path: Path, flatten: bool) -> None:
