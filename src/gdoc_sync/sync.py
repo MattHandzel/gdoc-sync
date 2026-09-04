@@ -48,6 +48,17 @@ from .syncstate import (
 # refused unless explicitly forced.
 EMPTY_GUARD_MIN_CHARS = 40
 
+# A push whose file has shrunk past this fraction of the last-synced text is
+# refused the same way: 20% of a note left behind is a truncation, not an edit.
+PUSH_SHRINK_MIN_RATIO = 0.2
+
+# The mirror image, and the one that was missing: a *render* that comes back
+# below this fraction of the last-synced doc is treated as a bad read of the
+# doc — a select-all-delete caught mid-poll, a partial `documents.get`, a tab
+# regression — not as an edit to adopt. Merging one of those into the file is
+# how a note becomes empty with `action=merged` and no conflict at all.
+REMOTE_SHRINK_MIN_RATIO = 0.5
+
 # Actions reported back to the caller / the editor.
 NOOP = "noop"
 PUSHED = "pushed"
@@ -56,6 +67,8 @@ CONFLICT = "conflict"
 BLOCKED = "blocked"
 SKIPPED = "skipped"
 ADOPTED = "adopted"
+
+RETRY_DETAIL = "doc changed during sync — retrying next pass"
 
 
 @dataclass
@@ -147,9 +160,12 @@ def _reconcile(
 ) -> SyncOutcome:
     """Bring ``path`` and its Google Doc into agreement, losing nothing.
 
-    ``render(asset_path)`` must return an object with ``.markdown`` and
-    ``.revision_id``; ``push(path)`` uploads the file as-is. Both are injected
-    so the decision logic can be tested without Google.
+    ``render(asset_path)`` must return an object with ``.markdown``,
+    ``.revision_id`` and ``.fingerprint``; ``push(path, *,
+    expected_fingerprint=None)`` uploads the file as-is and raises
+    :class:`gdoc_sync.push.RemoteChanged` when the doc's text has moved since
+    the render that fingerprint came from. Both are injected so the decision
+    logic can be tested without Google.
 
     ``peek_revision()``, when given, is a cheap revision-id fetch used to skip
     the full render when nothing can have changed.
@@ -212,7 +228,15 @@ def _reconcile(
     if adopt == "local":
         return _adopt_local(path, local, rendered, push, render, force, say)
     if adopt == "remote":
+        # An explicit "take the doc's version" is consent to the shrink below.
         return _adopt_remote(path, local, rendered, say)
+
+    # --- A collapsed render is a bad read, not an edit ----------------------
+    shrink = _shrink_guard(remote_md, bases.remote, force)
+    if shrink:
+        set_conflict(path, shrink)
+        say(f"  CONFLICT on {path.name}: {shrink}")
+        return SyncOutcome(CONFLICT, shrink, conflicted=True, notes=outcome.notes)
 
     # --- The four states ----------------------------------------------------
     if not local_changed and not remote_changed:
@@ -231,7 +255,8 @@ def _reconcile(
             set_conflict(path, guard)
             return SyncOutcome(CONFLICT, guard, conflicted=True)
         say(f"  local changed → pushing {path.name}")
-        push(path)
+        if not _push(push, path, rendered):
+            return SyncOutcome(SKIPPED, RETRY_DETAIL, notes=outcome.notes)
         _refresh_after_push(path, local, render, say)
         return SyncOutcome(PUSHED, "pushed local changes", pushed=True)
 
@@ -249,12 +274,18 @@ def _reconcile(
 
     # Nothing to write when the merge reproduced what is already on disk.
     if same_content(merged.text, local):
-        set_bases(path, local=local, remote=remote_md)
         if local_changed and allow_push:
+            # Only the *remote* ancestor advances before the push. Advancing
+            # the local one too would record the local edit as already sent,
+            # so a push that fails here would never be retried and the edit
+            # would live only on disk.
+            set_bases(path, local=bases.local, remote=remote_md)
             say(f"  pushing local changes to {path.name}")
-            push(path)
+            if not _push(push, path, rendered):
+                return SyncOutcome(SKIPPED, RETRY_DETAIL, notes=outcome.notes)
             _refresh_after_push(path, local, render, say)
             return SyncOutcome(PUSHED, "pushed local changes", pushed=True)
+        set_bases(path, local=local, remote=remote_md)
         return SyncOutcome(NOOP, "remote changes already present locally")
 
     # Guard the concurrent-save race: if the file moved under us while we were
@@ -266,17 +297,28 @@ def _reconcile(
         )
 
     _write_local(path, merged.text, outcome, tag="pre-merge")
-    set_bases(path, local=merged.text, remote=remote_md)
 
     if local_changed and allow_push:
+        # The remote ancestor advances now — the doc's edits are on disk, so
+        # they are no longer a pending remote change — but the local one only
+        # after the upload has actually happened. The two used to advance
+        # together here, which meant a push that raised left the engine
+        # believing the local edit had been sent: it was never pushed again,
+        # and lived only in the file.
+        set_bases(path, local=bases.local, remote=remote_md)
         say(f"  merged remote + local → pushing {path.name}")
-        push(path)
+        if not _push(push, path, rendered):
+            return SyncOutcome(
+                SKIPPED, RETRY_DETAIL,
+                wrote_local=True, backup=outcome.backup, notes=outcome.notes,
+            )
         _refresh_after_push(path, merged.text, render, say)
         return SyncOutcome(
             MERGED, "merged remote and local changes, pushed",
             pushed=True, wrote_local=True, backup=outcome.backup,
         )
 
+    set_bases(path, local=merged.text, remote=remote_md)
     return SyncOutcome(
         MERGED, "merged remote changes into local file",
         wrote_local=True, backup=outcome.backup,
@@ -325,17 +367,86 @@ def record_sync_baseline(path: Path, doc_id: str, local_text: str | None = None)
 # ---------------------------------------------------------------------------
 
 def _empty_guard(local: str, base_local: str, force: bool) -> str:
-    """Refuse to push an emptied file over a doc that had real content."""
+    """Refuse to push a file that has lost most of itself.
+
+    Emptied was the only case this caught, which left the near-miss wide open:
+    a note truncated to a single character still counted as "has content" and
+    replaced the whole doc with that character.
+    """
     if force:
         return ""
-    if normalize(local).strip():
+    base = normalize(base_local)
+    if len(base) < EMPTY_GUARD_MIN_CHARS:
         return ""
-    if len(normalize(base_local)) < EMPTY_GUARD_MIN_CHARS:
+    text = normalize(local)
+    if not text.strip():
+        return (
+            "local file is empty but the doc has content — refusing to wipe "
+            "the doc. Use --force if this is intentional."
+        )
+    # A base carrying conflict markers is inflated by both sides plus the
+    # ancestor, so every honest resolution of it "shrinks". Measuring against
+    # that would turn resolving a conflict into another conflict.
+    if has_conflict_markers(base_local):
+        return ""
+    if len(text) < len(base) * PUSH_SHRINK_MIN_RATIO:
+        return (
+            f"local file has shrunk by {_shrink_pct(len(text), len(base))}% "
+            f"since the last sync — refusing to replace the doc with what "
+            f"looks like a truncated file. Use --force if this is intentional."
+        )
+    return ""
+
+
+def _shrink_guard(remote_md: str, base_remote: str, force: bool) -> str:
+    """Refuse to adopt a render that came back mostly empty.
+
+    The symmetry with :func:`_empty_guard` is the point. A doc that renders
+    short is indistinguishable, to the merge, from someone having deleted most
+    of it — and because a cleanly round-tripping note has ``ours == base``,
+    merge3's fast path hands the render back verbatim. So a bad read of the
+    doc becomes the file, silently, reported as a clean merge.
+    """
+    if force:
+        return ""
+    base = normalize(base_remote)
+    if len(base) < EMPTY_GUARD_MIN_CHARS:
+        return ""
+    now = len(normalize(remote_md))
+    if now >= len(base) * REMOTE_SHRINK_MIN_RATIO:
         return ""
     return (
-        "local file is empty but the doc has content — refusing to wipe the "
-        "doc. Use --force if this is intentional."
+        f"the doc came back {_shrink_pct(now, len(base))}% shorter than the "
+        f"last synced version. That is more likely a bad read of the doc than "
+        f"an edit, so your file has been left untouched and nothing was "
+        f"merged. Check the doc; if the shrink is real, "
+        f"`gdoc-sync sync --adopt-remote` accepts it."
     )
+
+
+def _shrink_pct(now: int, before: int) -> int:
+    """How much smaller ``now`` is than ``before``, as a whole percentage."""
+    if before <= 0:
+        return 0
+    return max(0, min(100, round((before - now) * 100 / before)))
+
+
+def _push(push, path: Path, rendered) -> bool:
+    """Push ``path``, returning False when the doc moved under us.
+
+    The engine merged the doc as of ``rendered``; anything typed into it since
+    would be overwritten by this upload with no conflict recorded anywhere.
+    Passing the fingerprint lets the push refuse, and refusing is free: the
+    ancestors are arranged so the next pass merges the new remote edit and
+    sends the local one again.
+    """
+    from .push import RemoteChanged
+
+    try:
+        push(path, expected_fingerprint=getattr(rendered, "fingerprint", None))
+    except RemoteChanged:
+        return False
+    return True
 
 
 def _refresh_after_push(path: Path, local_text: str, render, say) -> None:

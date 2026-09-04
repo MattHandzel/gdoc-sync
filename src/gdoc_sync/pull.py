@@ -11,7 +11,7 @@ from pathlib import Path
 from .callouts import restore_callout_spellings
 from .comments import embed_comments, fetch_comments
 from .config import atomic_write, set_doc_id
-from .convert import doc_to_markdown, restore_fence_languages
+from .convert import doc_text_fingerprint, doc_to_markdown, restore_fence_languages
 from .mathmd import restore_math
 from .services import NUM_RETRIES, get_services
 from .syncstate import backup_file, clear_conflict, set_bases
@@ -50,6 +50,10 @@ class RenderedDoc:
     tabs: int
     comments: int
     images: int
+    # A digest of the doc's text as fetched, used by the sync engine to notice
+    # a doc that moved between this render and the push that follows it. The
+    # revision id cannot serve: Google churns it on autosave and presence.
+    fingerprint: str = ""
 
 
 def render_doc(
@@ -109,8 +113,9 @@ def render_doc(
             # message from the interpreter on the way out.
             pending_comments.exception()
             raise
-        markdown, title, revision_id, tab_count, images_saved = _render_body(
-            doc, asset_path=asset_path, local_text=local_text, say=say)
+        markdown, title, revision_id, tab_count, images_saved, fingerprint = (
+            _render_body(doc, asset_path=asset_path, local_text=local_text,
+                         say=say))
         comments = pending_comments.result()
 
     say(f"  {len(comments)} unresolved comment(s)")
@@ -123,6 +128,7 @@ def render_doc(
         tabs=max(tab_count, 1),
         comments=len(comments),
         images=images_saved(),
+        fingerprint=fingerprint,
     )
 
 
@@ -131,6 +137,7 @@ def _render_body(doc, *, asset_path, local_text, say):
     comments request is still in flight."""
     title = doc.get("title", "Untitled")
     revision_id = doc.get("revisionId", "")
+    fingerprint = doc_text_fingerprint(doc)
 
     image_saver, images_saved = None, (lambda: 0)
     if asset_path is not None:
@@ -175,7 +182,7 @@ def _render_body(doc, *, asset_path, local_text, say):
     if image_saver is not None:
         image_saver.finish()
 
-    return markdown, title, revision_id, len(tabs), images_saved
+    return markdown, title, revision_id, len(tabs), images_saved, fingerprint
 
 
 def preserve_frontmatter(existing: str, markdown: str) -> str:

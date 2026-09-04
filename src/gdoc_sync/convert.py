@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 from .callouts import table_callout
@@ -485,3 +486,52 @@ def restore_fence_languages(markdown: str, existing: str) -> str:
             opening = not opening
         out.append(line)
     return "".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Content fingerprint
+# ---------------------------------------------------------------------------
+
+def _iter_text_runs(value):
+    """Yield the ``content`` of every ``textRun`` nested anywhere in ``value``.
+
+    Walks the raw API JSON rather than a converted document so that tables,
+    lists and nested structural elements are all covered without this having
+    to know their shapes.
+    """
+    if isinstance(value, dict):
+        run = value.get("textRun")
+        if isinstance(run, dict) and isinstance(run.get("content"), str):
+            yield run["content"]
+        for nested in value.values():
+            yield from _iter_text_runs(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _iter_text_runs(nested)
+
+
+def _iter_tab_bodies(tabs):
+    """Yield the body of every tab, recursing into ``childTabs``."""
+    for tab in tabs or []:
+        doc_tab = tab.get("documentTab")
+        if isinstance(doc_tab, dict):
+            yield doc_tab.get("body", {})
+        yield from _iter_tab_bodies(tab.get("childTabs", []))
+
+
+def doc_text_fingerprint(doc: dict) -> str:
+    """A digest of everything a doc *says*, ignoring how it says it.
+
+    The sync engine cannot use ``revisionId`` to tell whether a doc moved
+    under it: Google rewrites the revision on autosave and presence changes,
+    so comparing revisions before a push would refuse to push forever while
+    anyone has the tab open. This hashes the document's text instead, so a
+    mismatch means someone actually typed something.
+
+    Covers the legacy top-level body and every tab (``childTabs`` included);
+    formatting-only changes deliberately do not move it.
+    """
+    bodies = [doc.get("body", {})]
+    bodies.extend(_iter_tab_bodies(doc.get("tabs", [])))
+    text = "".join(part for body in bodies for part in _iter_text_runs(body))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()

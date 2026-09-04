@@ -342,3 +342,28 @@ def extract_doc_id_from_url(url: str) -> str:
     if match:
         return match.group(1)
     return url
+
+
+# A Docs file id is a long opaque base64url-ish string. The length floor is
+# what separates a real id from the things people paste by mistake — a title,
+# a path, a truncated URL — every one of which `link` used to accept happily
+# and store as the doc this file now points at.
+_DOC_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
+
+
+def validate_doc_id(url_or_id: str) -> str:
+    """Return the doc id in ``url_or_id``, or raise ``ValueError``.
+
+    :func:`extract_doc_id_from_url` passes anything it does not recognise
+    straight through, which is right for a lenient lookup and wrong for
+    `link`: a typo there silently maps a file to a doc that does not exist,
+    and the first push then reports something confusing far from the cause.
+    """
+    doc_id = extract_doc_id_from_url((url_or_id or "").strip())
+    if _DOC_ID_RE.match(doc_id):
+        return doc_id
+    raise ValueError(
+        f"{url_or_id!r} is not a Google Doc. Give either the document's URL "
+        f"(https://docs.google.com/document/d/<id>/edit) or its bare id "
+        f"(at least 20 characters of letters, digits, `-` or `_`)."
+    )

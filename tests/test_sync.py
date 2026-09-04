@@ -13,6 +13,8 @@ from dataclasses import dataclass
 import pytest
 
 from gdoc_sync import config, sync, syncstate
+from gdoc_sync.merge import content_hash
+from gdoc_sync.push import RemoteChanged
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +31,7 @@ def isolated_env(tmp_path, monkeypatch):
 class FakeRendered:
     markdown: str
     revision_id: str = "rev-1"
+    fingerprint: str = ""
 
 
 class FakeDoc:
@@ -36,6 +39,10 @@ class FakeDoc:
 
     ``round_trip`` models the fact that md → Google Doc → md is lossy; the
     engine has to stay correct in spite of it.
+
+    ``push`` models the real one's lost-update check: given the fingerprint of
+    a render that is no longer current, it refuses rather than overwriting
+    what was typed in between.
     """
 
     def __init__(self, markdown: str = "", round_trip=None):
@@ -44,10 +51,16 @@ class FakeDoc:
         self.pushes = 0
         self._round_trip = round_trip or (lambda s: s)
 
-    def render(self, _path=None) -> FakeRendered:
-        return FakeRendered(self.markdown, f"rev-{self.revision}")
+    @property
+    def fingerprint(self) -> str:
+        return content_hash(self.markdown)
 
-    def push(self, path) -> None:
+    def render(self, _path=None) -> FakeRendered:
+        return FakeRendered(self.markdown, f"rev-{self.revision}", self.fingerprint)
+
+    def push(self, path, *, expected_fingerprint=None) -> None:
+        if expected_fingerprint is not None and expected_fingerprint != self.fingerprint:
+            raise RemoteChanged("the doc moved under the render")
         self.pushes += 1
         self.revision += 1
         self.markdown = self._round_trip(path.read_text())
@@ -502,3 +515,203 @@ def test_peek_revision_skips_the_expensive_render(tmp_path):
 
     assert result.action == sync.NOOP
     assert calls["render"] == 0, "an unchanged file must not be re-downloaded"
+
+
+# ---------------------------------------------------------------------------
+# A bad read of the doc is not an edit (P0-7)
+# ---------------------------------------------------------------------------
+
+# Long enough to clear EMPTY_GUARD_MIN_CHARS on both sides.
+SUBSTANTIAL = (
+    "# Meeting notes\n\nWe agreed the migration ships on Thursday.\n\n"
+    "Owner: Priya. Rollback plan is in the runbook.\n"
+)
+
+
+def test_a_collapsed_remote_render_does_not_empty_the_file(tmp_path):
+    """The headline data-loss bug: a doc that renders empty ate the note.
+
+    For a note that round-trips cleanly ``ours == base``, so merge3's fast
+    path returns the render verbatim — and a select-all-delete caught
+    mid-poll, or a partial `documents.get`, became the file with
+    ``action=merged`` and no conflict at all.
+    """
+    path, doc = linked(tmp_path, SUBSTANTIAL)
+    doc.edit("")  # the doc read back as nothing
+
+    result = run(path, doc)
+
+    assert result.action == sync.CONFLICT
+    assert result.conflicted
+    assert not result.wrote_local
+    assert path.read_text() == SUBSTANTIAL
+    assert "shorter" in result.detail
+    assert "--adopt-remote" in result.detail
+
+
+def test_a_truncated_remote_render_does_not_truncate_the_file(tmp_path):
+    path, doc = linked(tmp_path, SUBSTANTIAL)
+    doc.edit("# Meeting notes\n")  # ~15% of the doc came back
+
+    result = run(path, doc)
+
+    assert result.action == sync.CONFLICT
+    assert path.read_text() == SUBSTANTIAL
+    assert "%" in result.detail
+
+
+def test_a_small_remote_deletion_still_merges(tmp_path):
+    """The guard must not fire on an ordinary edit that shortens the doc."""
+    path, doc = linked(tmp_path, SUBSTANTIAL)
+    doc.edit(SUBSTANTIAL.replace("Rollback plan is in the runbook.\n", ""))
+
+    result = run(path, doc)
+
+    assert result.action == sync.MERGED
+    assert "runbook" not in path.read_text()
+
+
+def test_adopt_remote_accepts_a_shrunken_doc(tmp_path):
+    """The escape hatch the conflict names has to actually work."""
+    path, doc = linked(tmp_path, SUBSTANTIAL)
+    doc.edit("# Meeting notes\n")
+
+    result = run(path, doc, adopt="remote")
+
+    assert result.action == sync.ADOPTED
+    assert path.read_text().strip() == "# Meeting notes"
+
+
+def test_force_accepts_a_shrunken_doc(tmp_path):
+    path, doc = linked(tmp_path, SUBSTANTIAL)
+    doc.edit("# Meeting notes\n")
+
+    assert run(path, doc, force=True).action == sync.MERGED
+
+
+# ---------------------------------------------------------------------------
+# A truncated file is not an edit either (P0-8)
+# ---------------------------------------------------------------------------
+
+def test_a_truncated_file_does_not_replace_the_doc(tmp_path):
+    """The old guard only caught a file emptied to exactly nothing."""
+    path, doc = linked(tmp_path, SUBSTANTIAL)
+    path.write_text("x\n")
+
+    result = run(path, doc)
+
+    assert result.action == sync.CONFLICT
+    assert doc.pushes == 0
+    assert "Rollback plan" in doc.markdown
+    assert "%" in result.detail
+    assert "--force" in result.detail
+
+
+def test_force_allows_an_intentional_truncation(tmp_path):
+    path, doc = linked(tmp_path, SUBSTANTIAL)
+    path.write_text("x\n")
+
+    assert run(path, doc, force=True).action == sync.PUSHED
+    assert doc.markdown == "x\n"
+
+
+def test_an_ordinary_shortening_edit_still_pushes(tmp_path):
+    path, doc = linked(tmp_path, SUBSTANTIAL)
+    path.write_text("# Meeting notes\n\nShips Thursday. Priya owns it.\n")
+
+    assert run(path, doc).action == sync.PUSHED
+
+
+# ---------------------------------------------------------------------------
+# The merged-push window (P0-12)
+# ---------------------------------------------------------------------------
+
+def test_a_doc_edited_during_the_merged_push_window_is_not_overwritten(tmp_path):
+    """Between the render and the upload, `merged=True` skipped every check."""
+    original = "# Title\n\nalpha\n\nbeta\n\ngamma\n\ndelta\n"
+    path, doc = linked(tmp_path, original)
+    path.write_text(original.replace("alpha", "ALPHA LOCAL"))
+    doc.edit(original.replace("delta", "DELTA REMOTE"))
+
+    real_render = doc.render
+
+    def render_then_someone_types(p=None):
+        rendered = real_render(p)
+        doc.edit(doc.markdown.replace("beta", "BETA TYPED WHILE WE MERGED"))
+        return rendered
+
+    result = sync.reconcile(path, "doc-id",
+                            render=render_then_someone_types, push=doc.push)
+
+    assert result.action == sync.SKIPPED
+    assert "retrying next pass" in result.detail
+    assert doc.pushes == 0
+    assert "BETA TYPED WHILE WE MERGED" in doc.markdown
+
+
+def test_a_failed_merged_push_is_retried_with_both_edits_intact(tmp_path):
+    """The baselines must not record a push that never happened.
+
+    Both ancestors used to advance before the upload, so a push that raised
+    left the engine believing the local edit had been sent. It was never
+    pushed again and survived only on disk.
+    """
+    original = "# Title\n\nalpha\n\nbeta\n\ngamma\n\ndelta\n"
+    path, doc = linked(tmp_path, original)
+    path.write_text(original.replace("alpha", "ALPHA LOCAL"))
+    doc.edit(original.replace("delta", "DELTA REMOTE"))
+
+    def push_that_fails(p, *, expected_fingerprint=None):
+        raise RemoteChanged("doc moved")
+
+    first = sync.reconcile(path, "doc-id", render=doc.render, push=push_that_fails)
+    assert first.action == sync.SKIPPED
+    assert not first.pushed
+    assert "ALPHA LOCAL" in path.read_text()
+    assert "DELTA REMOTE" in path.read_text(), "the merge itself still landed"
+
+    second = run(path, doc)
+
+    assert second.pushed, "the local edit must still be pending after a failed push"
+    assert "ALPHA LOCAL" in doc.markdown
+    assert "DELTA REMOTE" in doc.markdown
+
+
+def test_any_push_exception_leaves_the_local_edit_pending(tmp_path):
+    """Not just RemoteChanged: a network blow-up must not eat the edit."""
+    original = "# Title\n\nalpha\n\nbeta\n\ngamma\n\ndelta\n"
+    path, doc = linked(tmp_path, original)
+    path.write_text(original.replace("alpha", "ALPHA LOCAL"))
+    doc.edit(original.replace("delta", "DELTA REMOTE"))
+
+    def exploding_push(p, *, expected_fingerprint=None):
+        raise RuntimeError("network gone")
+
+    with pytest.raises(RuntimeError):
+        sync.reconcile(path, "doc-id", render=doc.render, push=exploding_push)
+
+    second = run(path, doc)
+
+    assert second.pushed
+    assert "ALPHA LOCAL" in doc.markdown
+    assert "DELTA REMOTE" in doc.markdown
+
+
+def test_a_plain_push_also_checks_the_fingerprint(tmp_path):
+    """The local-only-change path races too: the doc can move mid-pass."""
+    path, doc = linked(tmp_path, SUBSTANTIAL)
+    path.write_text(SUBSTANTIAL + "\nOne more line.\n")
+
+    real_render = doc.render
+
+    def render_then_someone_types(p=None):
+        rendered = real_render(p)
+        doc.edit(doc.markdown + "\nTyped in the browser.\n")
+        return rendered
+
+    result = sync.reconcile(path, "doc-id",
+                            render=render_then_someone_types, push=doc.push)
+
+    assert result.action == sync.SKIPPED
+    assert doc.pushes == 0
+    assert "Typed in the browser." in doc.markdown

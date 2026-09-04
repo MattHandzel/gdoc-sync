@@ -301,8 +301,16 @@ def _dispatch(args: argparse.Namespace) -> None:
         unlink(args.file)
 
     elif args.command == "link":
-        from .config import extract_doc_id_from_url, set_doc_id, set_pull_only
-        doc_id = extract_doc_id_from_url(args.url)
+        from .config import set_doc_id, set_pull_only, validate_doc_id
+        try:
+            doc_id = validate_doc_id(args.url)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(2)
+        # Deliberately offline, and deliberately storing no revision: `link`
+        # has not seen the doc, so it cannot honestly claim a baseline. The
+        # push guard reads that absence as "never synced" and stops there
+        # rather than replacing a document nobody has looked at.
         set_doc_id(str(args.file), doc_id)
         if args.pull_only or args.two_way:
             set_pull_only(str(args.file), args.pull_only)
@@ -372,7 +380,9 @@ def _run_sync(files, *, adopt, no_push, force, json_lines) -> None:
         outcome = reconcile(
             path, doc_id,
             render=lambda p, _d=doc_id: render_doc(_d, asset_path=p),
-            push=lambda p: push_file(p, yes=True, merged=True),
+            push=lambda p, *, expected_fingerprint=None: push_file(
+                p, yes=True, merged=True,
+                expected_fingerprint=expected_fingerprint),
             allow_push=not (no_push or one_way),
             adopt=adopt,
             force=force,
