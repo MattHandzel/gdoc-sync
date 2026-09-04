@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+### Multi-tab documents, written as well as read
+
+`pull` has always flattened a tabbed doc into one file with `# [TAB] <title>`
+headers. `push` could not put them back: a push is a Drive docx import, which
+replaces a *whole document*, so it would have moved every tab's content into
+the first tab and dropped the rest. That is why `import` marked a tabbed doc
+pull-only, and why there was no way to author one at all.
+
+Now `create` and `push` read those headers. `create` makes a doc with one tab
+per section, in order; `push` matches each section to a tab **by title** and
+rewrites that tab in place, so the tab keeps its id and the links and comments
+anchored in it survive. `## [TAB]` nests a child tab under its parent.
+
+Tab content cannot go through pandoc's docx writer, because Drive's importer
+cannot address a tab. It is compiled from pandoc's own AST into Docs API
+requests instead (`mdrequests.py`), so both paths agree about what the markdown
+means. Headings, bold, italic, strikethrough, inline code, links, nested
+ordered and unordered lists, blockquotes, code blocks, tables, images and
+callouts all work, and the font and colour theme are applied per tab. The API
+has no request that creates a footnote or an equation inside a tab, so those
+degrade visibly: footnotes are inlined in brackets, equations written as
+LaTeX.
+
+Two deliberate safety choices:
+
+- A tab your file does not mention is **left alone**. Shared docs grow tabs
+  nobody's notes know about. `push --prune-tabs` removes them when you ask.
+- Pushing a file with **no** `[TAB]` headers into a doc that has several tabs
+  is refused outright, with the fix printed. `--flatten` overrides it.
+
+That refusal replaces the pull-only mark tabbed imports used to get: it tests
+the file actually in hand at the moment of the push, rather than a flag
+recorded once at import time. `--pull-only` still exists for documents that
+genuinely cannot round-trip.
+
+### Code blocks keep their font when a theme is applied
+
+Applying the document-wide font used to sweep over monospace runs. Since the
+monospace font is the *only* surviving signal that a paragraph was a fenced
+code block, that quietly turned every fence into prose on the next pull. The
+font pass now re-asserts monospace the same way it already re-asserted bold.
+
 ### Images sync both ways now
 
 Add an image in the Google Doc and the next `pull`/`sync`/`watch` downloads

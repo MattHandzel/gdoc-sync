@@ -67,20 +67,23 @@ gdoc-sync doctor           # confirms everything is wired up
   your first `# H1`, YAML `title:`, or the filename. The URL is printed and
   copied to your clipboard, and the doc is shared anyone-with-link-can-comment
   by default (`--edit`, `--view`, `--private`, `--share-with alice@x.com:edit`
-  to change it).
+  to change it). A file whose top-level sections are `# [TAB] <title>` becomes
+  a **multi-tab** doc, one tab per section — see [Tabs](#tabs).
 - **import** goes the other way round from `create`: give it a doc URL and it
   writes a *new* Markdown file, named after the document
   (`Q3 Plan: goals` → `q3-plan-goals.md`), with YAML frontmatter recording the
   title, source URL and doc id. The file is linked and its merge ancestors are
   registered, so `sync`/`watch` adopt it immediately with nothing to resolve.
   `--dest DIR` (or `import_dir:` in the config) picks the folder, `-o FILE`
-  names it yourself, `--no-frontmatter` skips the header. A tabbed doc is
-  imported **pull-only** — see [Limitations](#limitations-honest-ones).
+  names it yourself, `--no-frontmatter` skips the header. A tabbed doc imports
+  two-way, one `# [TAB]` section per tab — see [Tabs](#tabs).
 - **push** replaces the linked doc's content in place. The doc id, URL, and
   sharing are untouched. If someone edited the doc since your last pull, you
   get warned before overwriting (`--yes` for scripts). Reply, resolve, and
   comment markers in the file are applied to the doc's comment threads (see
-  below).
+  below). For a tabbed file each `# [TAB]` section is rewritten into its own
+  tab; `--prune-tabs` also deletes tabs your file no longer mentions, and
+  `--flatten` forces the old collapse-everything-into-tab-one behaviour.
 - **pull** brings the doc back as clean Markdown, including multi-tab
   documents, with every unresolved comment embedded as `{>>Author: text<<}`
   right after the text it anchors to. Images download to `<name>-assets/`
@@ -103,6 +106,50 @@ gdoc-sync doctor           # confirms everything is wired up
 - **link / unlink / open / auth / config** do what they say.
 - **rainbow** makes the first paragraph of any doc rainbow-colored. No further
   justification will be offered.
+
+## Tabs
+
+Google Docs can hold several tabs. gdoc-sync represents each one as a top-level
+`# [TAB] <title>` section of a single Markdown file, and child tabs as
+`## [TAB] <title>` under their parent:
+
+```markdown
+# [TAB] Overview
+
+The week ahead.
+
+---
+
+# [TAB] Monday
+
+Coffee at 09:00.
+
+## [TAB] Notes
+
+Bring the badge.
+```
+
+`create` makes the doc with those tabs, in that order. `push` matches each
+section to a tab **by title** and rewrites that tab in place, so the tab keeps
+its id — links to it and comments anchored in it survive. `pull` writes the
+same headers back, so the round trip is stable.
+
+Three things worth knowing:
+
+- **A tab your file does not mention is left alone.** Shared docs grow tabs
+  nobody's notes know about; deleting one on the next sync would be the worst
+  thing this tool could do. Pass `--prune-tabs` when you do want them removed.
+- **A file with no `[TAB]` headers will not be pushed into a tabbed doc.**
+  That push would flatten every tab into the first one, so it is refused with
+  an explanation; `pull` first, or pass `--flatten` if flattening is genuinely
+  what you want.
+- **Tab content does not go through pandoc's docx writer.** Drive's importer
+  replaces a whole document and cannot address a tab, so tab content is
+  compiled from pandoc's AST into Docs API requests instead. Headings, bold,
+  italic, strikethrough, inline code, links, nested lists, quotes, code
+  blocks, tables, images and callouts all work. Footnotes are inlined in
+  brackets and equations are written as visible LaTeX, because the API has no
+  request that creates either inside a tab.
 
 ## Comments
 
@@ -337,14 +384,16 @@ indentation stops at the first bullet.
   replies and resolves (which the API supports) attach to the real thread.
 - Push replaces the whole doc body. Comments survive it; suggested-edit
   history doesn't.
-- **A tabbed doc can only be synced one way.** `pull` reads every tab and
-  flattens them into one file with `# [TAB]` headers, but `push` writes a
-  single body — so pushing that file back would move all of it into the *first*
-  tab and delete the rest. Rather than let an automatic `watch` do that,
-  `import` marks a multi-tab doc **pull-only**: `sync` and `watch` bring doc
-  edits down and never push local edits up, and `status` labels it. Use
-  `gdoc-sync link <file> <url> --two-way` to lift the mark (and lose the tabs),
-  or `--pull-only` to set it on any file.
+- **Inside a tab, footnotes and equations degrade.** The Docs API has no
+  request that creates either one in a tab, so a footnote is inlined in square
+  brackets and an equation is written as visible LaTeX. Everything else about
+  a tab round-trips; see [Tabs](#tabs). Existing tab *order* is also left as
+  the document has it — new tabs are added at the position their section has
+  in the file, but a tab you dragged in Google Docs is not dragged back.
+- **`--pull-only` is still there for docs that cannot round-trip.**
+  `gdoc-sync link <file> <url> --pull-only` makes `sync`/`watch` bring doc
+  edits down and never push local edits up. Worth using for a document full of
+  suggestions, charts or equations. Tabbed docs no longer need it.
 - **A plain `>` blockquote comes back as an ordinary indented paragraph.**
   Google Docs has no blockquote of its own — pandoc expresses one as indent —
   so a pull cannot tell it apart from text somebody indented by hand. Callouts
@@ -363,6 +412,7 @@ indentation stops at the first bullet.
 
 ## Roadmap
 
+- Reorder existing tabs to match the file's section order
 - Publish to PyPI
 - Service-account auth for CI, plus a GitHub Action recipe
 - Folder/batch sync with `.gdocsyncignore`
@@ -384,6 +434,14 @@ mode it guards against only appears against the genuine round trip and Google's
 
 ```bash
 python3 tests/e2e/two_way_sync.py
+```
+
+Multi-tab docs have one too, for the same reason — the simulator in
+`tests/test_mdrequests.py` proves the index arithmetic, but only Google can
+say whether it accepts a request:
+
+```bash
+python3 tests/e2e/multi_tab.py          # --keep leaves the doc to look at
 ```
 
 It uses an isolated config/state pair (your real mappings are untouched),
