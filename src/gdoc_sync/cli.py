@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .config import set_config_override
+from .config import DEFAULT_FONT, DEFAULT_THEME, set_config_override
 
 
 def _existing_file(value: str) -> Path:
@@ -38,8 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("create", help="create a new Google Doc from a markdown file")
     p.add_argument("file", type=_existing_file)
     p.add_argument("--title", help="override auto-derived title (default: first H1, YAML title:, or filename)")
-    p.add_argument("--font", help="font family (default: from config, else Garamond)")
-    p.add_argument("--theme", help="color theme (default: from config, else catppuccin-latte; 'none' to disable)")
+    p.add_argument("--font", help=f"font family (default: from config, else {DEFAULT_FONT})")
+    p.add_argument("--theme", help=f"color theme (default: from config, else {DEFAULT_THEME}; "
+                                   f"'none' to disable). `gdoc-sync config` lists them")
     share = p.add_mutually_exclusive_group()
     share.add_argument("--private", action="store_true", help="do not share")
     share.add_argument("--edit", action="store_true", help="anyone with link can edit")
@@ -71,8 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("file", type=_existing_file)
     p.add_argument("--yes", "-y", action="store_true",
                    help="overwrite the remote even if it changed since last pull")
-    p.add_argument("--font")
-    p.add_argument("--theme")
+    p.add_argument("--font", help=f"font family (default: from config, else {DEFAULT_FONT})")
+    p.add_argument("--theme", help=f"color theme (default: from config, else {DEFAULT_THEME}; "
+                                   f"'none' to disable). `gdoc-sync config` lists them")
     p.add_argument("--prune-tabs", action="store_true",
                    help="delete tabs the markdown no longer has a "
                         "`# [TAB] <title>` section for (default: leave them)")
@@ -172,8 +174,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doctor", help="diagnose the setup (pandoc, config, auth, API)")
     p.add_argument("--offline", action="store_true", help="skip the live API check")
 
-    p = sub.add_parser("rainbow", help="🌈 color the first paragraph of a doc (easter egg)")
-    p.add_argument("args", nargs=argparse.REMAINDER)
+    # The command is the easter egg; its help was not meant to be. `args` used
+    # to be an argparse.REMAINDER catch-all, so `rainbow --help` printed a
+    # parser describing a single positional called "args" and nothing real.
+    p = sub.add_parser("rainbow", help="🌈 color the first paragraph of a doc (easter egg)",
+                       description="Color alternating characters (or words) of the first "
+                                   "paragraph of a Google Doc in rainbow order.")
+    p.add_argument("doc", help="a Google Doc URL or ID")
+    p.add_argument("--tab", metavar="TAB_ID",
+                   help="tab id, with or without the URL's 't.' prefix "
+                        "(default: the first tab with content)")
+    p.add_argument("--words", action="store_true",
+                   help="cycle colors per word instead of per character")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print what would change; do not apply it")
 
     return parser
 
@@ -181,7 +195,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.config:
-        set_config_override(args.config)
+        # An explicitly-named config that is not there is a mistake, not a
+        # request for defaults — a typo'd --config used to run silently with
+        # every setting (font, theme, share) reverted to the built-in default.
+        override = Path(args.config).expanduser()
+        if not override.exists():
+            print(f"Config file not found: {override}", file=sys.stderr)
+            sys.exit(2)
+        set_config_override(override)
 
     try:
         _dispatch(args)
@@ -189,9 +210,26 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(130)
 
 
+def _check_theme(theme: str | None) -> None:
+    """Reject an unknown theme name before any API work happens.
+
+    Covers both ``--theme`` and the config's ``theme:`` (which is what a
+    ``--theme``-less create/push falls back to). :func:`_api_guard` catches the
+    same error for the paths that reach a theme lookup later.
+    """
+    from .config import get_theme
+    from .style import UnknownThemeError, check_theme
+    try:
+        check_theme(theme if theme is not None else get_theme())
+    except UnknownThemeError as e:
+        print(e, file=sys.stderr)
+        sys.exit(2)
+
+
 def _dispatch(args: argparse.Namespace) -> None:
     if args.command == "create":
         from .create import create_doc
+        _check_theme(args.theme)
         if args.private:
             share_mode = "private"
         elif args.edit:
@@ -233,6 +271,7 @@ def _dispatch(args: argparse.Namespace) -> None:
 
     elif args.command == "push":
         from .push import push
+        _check_theme(args.theme)
         _api_guard(lambda: push(args.file, yes=args.yes, font=args.font,
                                 theme=args.theme, prune_tabs=args.prune_tabs,
                                 flatten=args.flatten))
@@ -276,10 +315,13 @@ def _dispatch(args: argparse.Namespace) -> None:
     elif args.command == "share":
         from .extras import resolve_doc_id
         from .share import share
+        # Resolve the target first: a missing file used to be reported as
+        # "pass --with, --anyone, or --private", blaming the flags for a
+        # filename that was simply wrong.
+        doc_id, _ = resolve_doc_id(args.target)
         if not (args.with_ or args.anyone or args.private):
             print("Nothing to do — pass --with, --anyone, or --private.", file=sys.stderr)
             sys.exit(1)
-        doc_id, _ = resolve_doc_id(args.target)
         _api_guard(lambda: share(doc_id, with_=args.with_, anyone=args.anyone,
                                  private=args.private))
 
@@ -326,14 +368,35 @@ def _dispatch(args: argparse.Namespace) -> None:
 
     elif args.command == "rainbow":
         from .rainbow import main as rainbow_main
-        rainbow_main(args.args)
+        rainbow_argv = [args.doc]
+        if args.tab:
+            rainbow_argv += ["--tab", args.tab]
+        if args.words:
+            rainbow_argv.append("--words")
+        if args.dry_run:
+            rainbow_argv.append("--dry-run")
+        rainbow_main(rainbow_argv)
 
 
 def _sync_targets(args, verb: str) -> list[Path]:
-    """The files a sync/watch command should operate on."""
+    """The files a sync/watch command should operate on.
+
+    A mapping whose file has been renamed or deleted is skipped — but it is
+    said out loud (on stderr, so ``--json`` output stays machine-clean).
+    Silently dropping it is how a renamed note stops syncing without anyone
+    noticing until the doc and the file have drifted apart for weeks.
+    """
     from .config import all_mappings
     if args.all:
-        files = [Path(f) for f in all_mappings() if Path(f).exists()]
+        files = []
+        for mapped in all_mappings():
+            path = Path(mapped)
+            if path.exists():
+                files.append(path)
+            else:
+                print(f"Warning: {path} is linked to a Google Doc but no longer "
+                      f"exists — not {verb}ing it. If you renamed or deleted it: "
+                      f"gdoc-sync unlink {path}", file=sys.stderr)
     else:
         files = list(args.files)
     if not files:
@@ -500,8 +563,15 @@ def _print_config() -> None:
 def _api_guard(fn) -> None:
     """Run an API-touching action with friendly error reporting."""
     from googleapiclient.errors import HttpError
+
+    from .style import UnknownThemeError
     try:
         fn()
+    except UnknownThemeError as e:
+        # Reached when the theme comes from the config on a path with no
+        # --theme flag to pre-check (sync, watch).
+        print(e, file=sys.stderr)
+        sys.exit(2)
     except HttpError as e:
         print(f"Google API error: {e}", file=sys.stderr)
         sys.exit(1)

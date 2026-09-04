@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Wrong input is now an error instead of a quiet wrong result
+
+Every one of these used to exit 0 and do something plausible-looking:
+
+- `gdoc-sync open nonsense` treated the typo as a document id and opened
+  `docs.google.com/document/d/nonsense` in the browser. Anything that is
+  neither an existing linked file nor a Docs URL/id now exits 2 and opens
+  nothing. `share`, `diff` and `export` share the check, so
+  `share <missing file>` names the file instead of blaming `--with`/`--anyone`.
+- `gdoc-sync auth --client typo.json` started the OAuth consent flow before
+  discovering the file was not there. It now fails first.
+- An unknown `--theme` (or `theme:` in the config) silently produced a
+  completely unstyled document. It now exits 2 and lists the available themes.
+  `none` still means "no theme".
+- A `--config` path that does not exist was accepted, silently reverting every
+  setting to its default. It now exits 2 naming the path. `$GDOC_SYNC_CONFIG`
+  keeps its lenient behaviour.
+- `sync --all` and `watch --all` skipped mappings whose file had been renamed
+  or deleted without a word, so a renamed note just stopped syncing. Each one
+  now prints a warning to stderr (stdout stays clean for `--json`) suggesting
+  `gdoc-sync unlink <path>`, and `status` lists them together.
+- `create --help` claimed the default theme was `catppuccin-latte`; it is
+  `professional`, and the help text now comes from the constant. `rainbow
+  --help` described a parser with one argument called `args`; it now documents
+  `doc`, `--tab`, `--words` and `--dry-run`.
+
+### Version metadata is checked, not assumed
+
+`pyproject.toml` and `flake.nix` said 0.8.0 while the package said 0.9.0.
+All three now say 0.9.0, and `scripts/check_version.py` (run in CI) fails with
+a diff if they ever disagree again. The PyPI classifier is
+`Development Status :: 3 - Alpha`, which is where the project actually is.
+
 ### Multi-tab documents, written as well as read
 
 `pull` has always flattened a tabbed doc into one file with `# [TAB] <title>`

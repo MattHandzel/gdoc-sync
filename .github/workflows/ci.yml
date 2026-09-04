@@ -22,6 +22,8 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Lint
         run: ruff check src tests
+      - name: Version consistency
+        run: python scripts/check_version.py
       - name: Test
         run: pytest -q
       - name: CLI smoke test
