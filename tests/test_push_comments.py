@@ -10,10 +10,10 @@ covered elsewhere and is not what is under test here.
 from __future__ import annotations
 
 import pytest
-from tests.test_comments import FakeDrive, authored_file
 
 from gdoc_sync import config, syncstate
 from gdoc_sync import push as push_mod
+from tests.test_comments import FakeDrive, authored_file
 
 
 @pytest.fixture(autouse=True)
