@@ -359,3 +359,92 @@ def test_set_pull_only_is_idempotent_and_removable(tmp_path):
     assert config.is_pull_only(f) is True
     config.set_pull_only(f, False)
     assert config.is_pull_only(f) is False
+
+
+# ---------------------------------------------------------------------------
+# Portable state keys: one state file, several machines
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    """A home directory at ``/…/Users/<user>`` so foreign-home keys can be tested."""
+    home = tmp_path / "Users" / "matt"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
+    assert Path.home() == home
+    return home
+
+
+def test_new_links_are_keyed_relative_to_home(fake_home):
+    f = fake_home / "notes" / "a.md"
+    f.parent.mkdir()
+    f.write_text("x")
+    config.set_doc_id(f, "doc1")
+    assert config.load_state()["mappings"] == {"~/notes/a.md": "doc1"}
+    assert config.get_doc_id(f) == "doc1"
+    assert config.all_mappings() == {str(f): "doc1"}
+
+
+def test_file_outside_home_keeps_absolute_key(fake_home, tmp_path):
+    f = tmp_path / "elsewhere.md"
+    f.write_text("x")
+    config.set_doc_id(f, "doc1")
+    assert config.load_state()["mappings"] == {str(f.resolve()): "doc1"}
+    assert config.get_doc_id(f) == "doc1"
+
+
+def test_legacy_key_from_another_machine_is_found(fake_home):
+    """A state file written on Linux (``/home/matt/…``) works on a Mac."""
+    f = fake_home / "notes" / "a.md"
+    f.parent.mkdir()
+    f.write_text("x")
+    config.save_state({
+        "mappings": {"/home/matt/notes/a.md": "doc1"},
+        "revisions": {"/home/matt/notes/a.md": "rev1"},
+        "pull_only": ["/home/matt/notes/a.md"],
+    })
+    assert config.get_doc_id(f) == "doc1"
+    assert config.get_revision(f) == "rev1"
+    assert config.is_pull_only(f)
+    assert config.all_mappings() == {str(f): "doc1"}
+
+
+def test_legacy_key_for_another_user_is_not_claimed(fake_home):
+    f = fake_home / "notes" / "a.md"
+    f.parent.mkdir()
+    f.write_text("x")
+    config.save_state({"mappings": {"/home/someone-else/notes/a.md": "doc1"}})
+    assert config.get_doc_id(f) is None
+    assert config.all_mappings() == {"/home/someone-else/notes/a.md": "doc1"}
+
+
+def test_existing_legacy_key_is_updated_in_place(fake_home):
+    """An older gdoc-sync on the other machine must still find its own keys."""
+    f = fake_home / "notes" / "a.md"
+    f.parent.mkdir()
+    f.write_text("x")
+    legacy = "/home/matt/notes/a.md"
+    config.save_state({"mappings": {legacy: "doc1"}, "revisions": {legacy: "rev1"}})
+    config.set_doc_id(f, "doc2", revision_id="rev2")
+    config.set_revision(f, "rev3")
+    config.set_pull_only(f, True)
+    state = config.load_state()
+    assert state["mappings"] == {legacy: "doc2"}
+    assert state["revisions"] == {legacy: "rev3"}
+    assert state["pull_only"] == [legacy]
+    config.set_pull_only(f, False)
+    assert config.load_state()["pull_only"] == []
+    assert config.remove_mapping(f)
+    assert config.load_state()["mappings"] == {}
+
+
+def test_expand_state_key():
+    home = str(Path.home())
+    user = Path.home().name
+    assert config.expand_state_key("~/x/y.md") == f"{home}/x/y.md"
+    assert config.expand_state_key(f"/home/{user}/x.md") == f"{home}/x.md"
+    assert config.expand_state_key(f"/Users/{user}/x.md") == f"{home}/x.md"
+    assert config.expand_state_key("/home/other/x.md") == "/home/other/x.md"
+    assert config.expand_state_key("/tmp/x.md") == "/tmp/x.md"

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### The same state file on Linux and macOS
+
+- **Links made on one machine were invisible on the other.** The state file
+  keyed every link by absolute path, so a vault synced between a Linux box
+  (`/home/you/...`) and a Mac (`/Users/you/...`) showed zero linked files on
+  the second machine, and a `state_file:` written with the first machine's
+  home crashed `create` on the second (`/home` is read-only on macOS). New
+  links are now keyed `~/...`; lookups also accept the absolute forms an older
+  gdoc-sync wrote and re-root a legacy `/home/<you>/…` key under this
+  machine's home. Existing keys are never rewritten, so an un-upgraded
+  install on the other machine keeps working. Use `~/` in `state_file:`.
+- **`doctor` reports what will actually happen.** It fails a state file
+  whose directory cannot be created, counts linked files that are not present
+  on this machine, and names the clipboard tool `create` will use here
+  (`pbcopy` on macOS — it used to print `wl-copy` whenever one was on PATH).
+- **CI is green again.** `tests/test_push_comments.py` imported a sibling
+  test module through a `tests` package that did not exist.
+
 ### Data safety: what a persona audit found, and what is closed
 
 Nine reviewers with different jobs — a tech writer, a vault user, an academic,

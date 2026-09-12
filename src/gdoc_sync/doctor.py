@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from .auth import CREATE_CLIENT_URL, client_secret_path, consent_screen_url, project_id, token_path
-from .config import all_mappings, config_path, load_config, state_path
+from .config import all_mappings, config_path, get_clipboard_command, load_config, state_path
+from .mdutils import _clipboard_candidates
 
 OK, BAD, SKIP = "✓", "✗", "–"
 
@@ -53,6 +56,45 @@ def _check_api() -> tuple[str, str]:
         return BAD, f"API call failed: {e}"
 
 
+def _check_state() -> tuple[str, str]:
+    """The state file must be readable now and writable later.
+
+    A ``state_file:`` copied from another machine (``/home/me/...`` on a Mac,
+    where ``/home`` is a read-only automount) parses fine and reports zero
+    links, then the first ``create`` dies trying to make the directory. Walk
+    up to the nearest existing ancestor and check it can take a write.
+    """
+    p = state_path()
+    ancestor = p if p.exists() else p.parent
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    if p.exists() and not os.access(p, os.W_OK):
+        return BAD, f"{p} is not writable"
+    if not p.exists() and (not ancestor.is_dir() or not os.access(ancestor, os.W_OK)):
+        return BAD, (f"{p}: cannot be created (nothing above it is writable; nearest existing "
+                     f"parent is {ancestor}) — fix `state_file:` in the config")
+    mappings = all_mappings()
+    missing = sum(1 for path in mappings if not Path(path).exists())
+    detail = f"{p} ({len(mappings)} linked file(s)"
+    if missing:
+        detail += f", {missing} not present on this machine"
+    return OK, detail + ")"
+
+
+def _check_clipboard() -> tuple[str, str]:
+    """Report the command `create` will actually copy with on this platform."""
+    explicit = get_clipboard_command()
+    if explicit:
+        tool = explicit.split()[0]
+        if shutil.which(tool):
+            return OK, f"{explicit} (clipboard_command from config)"
+        return BAD, f"clipboard_command `{explicit}` not on PATH"
+    for cmd, name in _clipboard_candidates():
+        if shutil.which(cmd[0]):
+            return OK, name
+    return SKIP, "no clipboard tool found — --no-copy still works"
+
+
 def doctor(online: bool = True) -> int:
     """Print a ✓/✗ report; return a shell exit code (0 = healthy)."""
     rows: list[tuple[str, str, str]] = []
@@ -72,7 +114,7 @@ def doctor(online: bool = True) -> int:
         rows.append(("config", SKIP, f"{cp} (not created — defaults in effect)"))
 
     try:
-        rows.append(("state", OK, f"{state_path()} ({len(all_mappings())} linked file(s))"))
+        rows.append(("state", *_check_state()))
     except Exception as e:
         rows.append(("state", BAD, f"{state_path()}: {e}"))
 
@@ -94,9 +136,7 @@ def doctor(online: bool = True) -> int:
     elif online:
         rows.append(("api", SKIP, "skipped (no usable token)"))
 
-    clip = next((t for t in ("wl-copy", "xclip", "pbcopy") if shutil.which(t)), None)
-    rows.append(("clipboard", OK if clip else SKIP,
-                 clip or "no clipboard tool (wl-copy/xclip/pbcopy) — --no-copy still works"))
+    rows.append(("clipboard", *_check_clipboard()))
 
     for name, mark, detail in rows:
         print(f" {mark} {name:<14} {detail}")

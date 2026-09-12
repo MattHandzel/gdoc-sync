@@ -237,12 +237,85 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def state_key(local_path: str | os.PathLike) -> str:
+    """The key a local file is stored under in the state file.
+
+    Absolute, resolved, but with the home directory spelled ``~``. The state
+    file is meant to travel between machines (a synced vault carries it), and
+    the same user's home is ``/home/matt`` on Linux and ``/Users/matt`` on
+    macOS: keyed by the raw absolute path, every link made on one machine is
+    invisible on the other. Files outside the home directory keep their
+    absolute path.
+    """
+    resolved = Path(local_path).expanduser().resolve()
+    try:
+        return "~/" + resolved.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+# Legacy keys (0.9 and earlier) were absolute paths. One written on another
+# machine by the same user starts with *that* machine's home directory; the
+# two common layouts are recognised by user name. The state file is never
+# rewritten to the new form: an older gdoc-sync on the other machine only
+# understands the absolute keys it wrote, and a shared state file has to keep
+# working for both until every install is upgraded.
+_HOME_LAYOUTS = ("/home/{user}", "/Users/{user}")
+_FOREIGN_HOME = re.compile(r"^/(?:home|Users)/([^/]+)(?=/|$)")
+
+
+def state_key_candidates(local_path: str | os.PathLike) -> list[str]:
+    """Every key a file may be stored under, portable form first.
+
+    Lookups try each; writes update whichever already exists (so a key stays
+    in the form the machine that wrote it can read) and otherwise use the
+    portable form.
+    """
+    portable = state_key(local_path)
+    resolved = str(Path(local_path).expanduser().resolve())
+    out = [portable]
+    if resolved != portable:
+        out.append(resolved)
+        rel = portable[2:]
+        for layout in _HOME_LAYOUTS:
+            legacy = layout.format(user=Path.home().name) + "/" + rel
+            if legacy not in out:
+                out.append(legacy)
+    return out
+
+
+def _find_key(table, local_path: str | os.PathLike) -> str | None:
+    """The key ``local_path`` is stored under in ``table``, if any."""
+    for k in state_key_candidates(local_path):
+        if k in table:
+            return k
+    return None
+
+
+def expand_state_key(key: str) -> str:
+    """The absolute path on *this* machine for a state-file key.
+
+    ``~/…`` expands to this home; a legacy absolute key under the same user's
+    home on another layout is re-rooted here; anything else is returned as is.
+    """
+    if key.startswith("~/") or key == "~":
+        return str(Path(key).expanduser())
+    m = _FOREIGN_HOME.match(key)
+    if m and m.group(1) == Path.home().name:
+        return str(Path.home()) + key[m.end():]
+    return key
+
+
 def load_state() -> dict:
     """Read the state file, tolerating a corrupt one rather than crashing.
 
     Returning ``{}`` on unparseable YAML would silently discard every mapping
     on the next save, so the damaged file is moved aside first — the user keeps
     a recoverable copy and gets told where it went.
+
+    Path keys are returned exactly as the file holds them (absolute in files
+    written by 0.9 and earlier, ``~/…`` for links made since); use
+    :func:`state_key_candidates` or :func:`expand_state_key` to match them.
     """
     p = state_path()
     if not p.exists():
@@ -363,35 +436,37 @@ def mutate_state(fn: Callable[[dict], object], timeout: float = STATE_LOCK_TIMEO
 
 
 def get_doc_id(local_path: str | os.PathLike) -> str | None:
-    state = load_state()
-    return state.get("mappings", {}).get(str(Path(local_path).resolve()))
+    mappings = load_state().get("mappings", {})
+    key = _find_key(mappings, local_path)
+    return mappings.get(key) if key else None
 
 
 def set_doc_id(local_path: str | os.PathLike, doc_id: str, revision_id: str = "") -> None:
-    resolved = str(Path(local_path).resolve())
-
     def apply(state: dict) -> bool:
-        state.setdefault("mappings", {})
-        state.setdefault("revisions", {})
-        state["mappings"][resolved] = doc_id
+        mappings = state.setdefault("mappings", {})
+        revisions = state.setdefault("revisions", {})
+        key = _find_key(mappings, local_path) or state_key(local_path)
+        mappings[key] = doc_id
         if revision_id:
-            state["revisions"][resolved] = revision_id
+            revisions[_find_key(revisions, local_path) or key] = revision_id
         return True
 
     mutate_state(apply)
 
 
 def get_revision(local_path: str | os.PathLike) -> str | None:
-    state = load_state()
-    return state.get("revisions", {}).get(str(Path(local_path).resolve()))
+    revisions = load_state().get("revisions", {})
+    key = _find_key(revisions, local_path)
+    return revisions.get(key) if key else None
 
 
 def set_revision(local_path: str | os.PathLike, revision_id: str) -> None:
-    resolved = str(Path(local_path).resolve())
-
     def apply(state: dict) -> bool:
-        state.setdefault("revisions", {})
-        state["revisions"][resolved] = revision_id
+        revisions = state.setdefault("revisions", {})
+        mappings = state.get("mappings", {})
+        key = (_find_key(revisions, local_path) or _find_key(mappings, local_path)
+               or state_key(local_path))
+        revisions[key] = revision_id
         return True
 
     mutate_state(apply)
@@ -399,21 +474,23 @@ def set_revision(local_path: str | os.PathLike, revision_id: str) -> None:
 
 def remove_mapping(local_path: str | os.PathLike) -> bool:
     """Unlink a local file from its doc. Returns True if a mapping was removed."""
-    resolved = str(Path(local_path).resolve())
+    keys = state_key_candidates(local_path)
 
     def apply(state: dict) -> bool:
-        removed = state.get("mappings", {}).pop(resolved, None) is not None
-        state.get("revisions", {}).pop(resolved, None)
-        if resolved in state.get("pull_only", []):
-            state["pull_only"].remove(resolved)
+        removed = False
+        for k in keys:
+            removed |= state.get("mappings", {}).pop(k, None) is not None
+            state.get("revisions", {}).pop(k, None)
+            while k in state.get("pull_only", []):
+                state["pull_only"].remove(k)
         return removed
 
     return bool(mutate_state(apply))
 
 
 def all_mappings() -> dict[str, str]:
-    """All local-file → doc-id mappings."""
-    return dict(load_state().get("mappings", {}))
+    """All local-file → doc-id mappings, keyed by absolute path on this machine."""
+    return {expand_state_key(k): v for k, v in load_state().get("mappings", {}).items()}
 
 
 def is_pull_only(local_path: str | os.PathLike) -> bool:
@@ -431,19 +508,23 @@ def is_pull_only(local_path: str | os.PathLike) -> bool:
     hand at the moment of the push, which is a truer test than a flag recorded
     once at import time.
     """
-    return str(Path(local_path).resolve()) in load_state().get("pull_only", [])
+    marked = load_state().get("pull_only", [])
+    return any(k in marked for k in state_key_candidates(local_path))
 
 
 def set_pull_only(local_path: str | os.PathLike, enabled: bool = True) -> None:
     """Mark (or unmark) a file as one-way. Idempotent."""
-    resolved = str(Path(local_path).resolve())
+    keys = state_key_candidates(local_path)
 
     def apply(state: dict) -> bool:
         marked = state.setdefault("pull_only", [])
-        if enabled and resolved not in marked:
-            marked.append(resolved)
-        elif not enabled and resolved in marked:
-            marked.remove(resolved)
+        present = [k for k in keys if k in marked]
+        if enabled and not present:
+            marked.append(_find_key(state.get("mappings", {}), local_path) or keys[0])
+        elif not enabled and present:
+            for k in present:
+                while k in marked:
+                    marked.remove(k)
         else:
             return False  # already in the wanted state; don't rewrite the file
         return True

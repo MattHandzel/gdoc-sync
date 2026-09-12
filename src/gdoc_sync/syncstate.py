@@ -28,19 +28,32 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import atomic_write, load_state, mutate_state
+from .config import (
+    atomic_write,
+    expand_state_key,
+    load_state,
+    mutate_state,
+    state_key,
+    state_key_candidates,
+)
 
 # How many timestamped backups to keep per file before pruning the oldest.
 MAX_BACKUPS = 20
 
 
 def _key(path: str | os.PathLike) -> str:
-    return str(Path(path).expanduser().resolve())
+    """Key for the path-keyed tables in the state file (see :func:`state_key`)."""
+    return state_key(path)
 
 
 def _slug(path: str | os.PathLike) -> str:
-    """Filesystem-safe, collision-free stem for a path's snapshot files."""
-    resolved = _key(path)
+    """Filesystem-safe, collision-free stem for a path's snapshot files.
+
+    Hashed from the absolute path, not the portable key: snapshots and backups
+    live in this machine's XDG state directory and never travel, and changing
+    the slug would orphan every baseline already recorded.
+    """
+    resolved = str(Path(path).expanduser().resolve())
     digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
     return f"{Path(resolved).stem[:40]}-{digest}"
 
@@ -221,12 +234,21 @@ class Conflict:
         }
 
 
+def _stored_key(table, path: str | os.PathLike) -> str | None:
+    for k in state_key_candidates(path):
+        if k in table:
+            return k
+    return None
+
+
 def get_conflict(path: str | os.PathLike) -> Conflict | None:
-    raw = load_state().get("conflicts", {}).get(_key(path))
+    conflicts = load_state().get("conflicts") or {}
+    key = _stored_key(conflicts, path)
+    raw = conflicts.get(key) if key else None
     if not isinstance(raw, dict):
         return None
     return Conflict(
-        path=_key(path),
+        path=str(Path(path).expanduser().resolve()),
         since=str(raw.get("since", "")),
         detail=str(raw.get("detail", "")),
         markers=bool(raw.get("markers", False)),
@@ -243,7 +265,7 @@ def set_conflict(
 ) -> Conflict:
     """Mark a file conflicted. Auto-sync stays suspended until cleared."""
     conflict = Conflict(
-        path=_key(path),
+        path=str(Path(path).expanduser().resolve()),
         since=time.strftime("%Y-%m-%dT%H:%M:%S"),
         detail=detail,
         markers=markers,
@@ -251,7 +273,9 @@ def set_conflict(
     )
 
     def apply(state: dict) -> Conflict:
-        state.setdefault("conflicts", {})[conflict.path] = conflict.as_dict()
+        conflicts = state.setdefault("conflicts", {})
+        key = _stored_key(conflicts, path) or _key(path)
+        conflicts[key] = conflict.as_dict()
         return conflict  # truthy, so mutate_state saves and hands it back
 
     return mutate_state(apply)  # type: ignore[return-value]
@@ -259,20 +283,21 @@ def set_conflict(
 
 def clear_conflict(path: str | os.PathLike) -> bool:
     """Clear a file's conflict flag. Returns True if one was set."""
-    key = _key(path)
+    keys = state_key_candidates(path)
 
     def apply(state: dict) -> bool:
         conflicts = state.get("conflicts")
         if not isinstance(conflicts, dict):
             return False
-        return conflicts.pop(key, None) is not None
+        return any([conflicts.pop(k, None) is not None for k in keys])
 
     return bool(mutate_state(apply))
 
 
 def all_conflicts() -> dict[str, Conflict]:
     out: dict[str, Conflict] = {}
-    for path, raw in (load_state().get("conflicts") or {}).items():
+    for key, raw in (load_state().get("conflicts") or {}).items():
+        path = expand_state_key(key)
         if isinstance(raw, dict):
             out[path] = Conflict(
                 path=path,
