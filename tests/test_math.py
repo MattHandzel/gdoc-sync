@@ -323,6 +323,134 @@ def test_text_without_equations_is_untouched():
 
 
 # --------------------------------------------------------------------------
+# A local file that already carries placeholders
+#
+# These are this module's own handwriting: an equation it could not match gets
+# written into the file as a visible `[equation]` gap. So the local side can
+# hold MORE placeholders than it holds math spans, and every test below is
+# about that count being unequal on purpose.
+#
+# Before the fix this was fatal rather than merely awkward. The local ordinals
+# the alignment works in are counted by counting placeholders, so a stale one
+# pushed the index past the end of the span list and `restore_math` raised
+# IndexError — which aborts the render, and with it the whole `sync --all`
+# run, so ONE poisoned file stopped every other document from syncing. Worse,
+# it was self-inflicted and self-sustaining: a lossy pull wrote the very
+# placeholder that made every later pull crash. Seen in production on
+# 2026-09-16 (`how-does-investing-work.md`: 7 math spans, 8 placeholders).
+# --------------------------------------------------------------------------
+
+def test_a_stale_placeholder_does_not_crash_the_pull():
+    """The production shape: more placeholders locally than math spans."""
+    local = (f"An opening paragraph with {PLACEHOLDER} left by an earlier pull.\n\n"
+             "Let $x$ be the rate.\n\n"
+             "And $y$ the other one.\n")
+    pulled = (f"An opening paragraph with {PLACEHOLDER} left by an earlier pull.\n\n"
+              f"Let {PLACEHOLDER} be the rate.\n\n"
+              f"And {PLACEHOLDER} the other one.\n")
+
+    out, lost = restore_math(pulled, local)
+
+    # Both real equations come back...
+    assert "Let $x$ be the rate." in out
+    assert "And $y$ the other one." in out
+    # ...and the stale gap stays a gap, because there is no LaTeX behind it.
+    assert out.startswith(f"An opening paragraph with {PLACEHOLDER} left")
+    assert lost == 1
+    assert out == local
+
+
+def test_a_stale_placeholder_does_not_steal_a_neighbours_latex():
+    """The silent-swap failure, in the shape this bug creates.
+
+    The stale placeholder sits FIRST. Restoring by raw ordinal would hand it
+    `$x$` and shift every later equation up by one — the exact corruption this
+    module exists to refuse — so the offset has to come from tracking which
+    local ordinals are spans, not from counting them.
+    """
+    local = (f"A stale {PLACEHOLDER} here.\n\n"
+             "Then $x$ arrives.\n\n"
+             "Then $y$ arrives.\n")
+    pulled = (f"A stale {PLACEHOLDER} here.\n\n"
+              f"Then {PLACEHOLDER} arrives.\n\n"
+              f"Then {PLACEHOLDER} arrives.\n")
+
+    out, lost = restore_math(pulled, local)
+
+    assert "Then $x$ arrives." in out
+    assert "Then $y$ arrives." in out
+    assert out.startswith(f"A stale {PLACEHOLDER} here.")
+    assert lost == 1
+
+
+def test_many_stale_placeholders_with_prose_edited_around_them():
+    """Several stale gaps at once, with the alignment doing real work.
+
+    Two placeholders were already in the file and the reviewer reworded the
+    prose around everything, so the identical-paragraphs fast path cannot fire
+    and the diff has to carry it. Every real equation still comes home.
+    """
+    local = (f"Intro with {PLACEHOLDER} and {PLACEHOLDER} in it.\n\n"
+             "The rate is $r = 1$ per year.\n\n"
+             "The total is $$T = \\sum_i r_i$$ overall.\n")
+    pulled = (f"Reworded intro with {PLACEHOLDER} and {PLACEHOLDER} in it.\n\n"
+              f"The rate is {PLACEHOLDER} per annum.\n\n"
+              f"The total is {PLACEHOLDER} altogether.\n")
+
+    out, lost = restore_math(pulled, local)
+
+    assert "$r = 1$" in out
+    assert "$$T = \\sum_i r_i$$" in out
+    assert lost == 2  # the two stale gaps, and only those
+
+
+def test_a_stale_placeholder_and_no_math_at_all_is_not_an_error():
+    """`ongoing-agenda.md`'s shape: placeholders, zero spans. Nothing to do."""
+    local = f"All {PLACEHOLDER} gaps {PLACEHOLDER} and no math.\n"
+    out, lost = restore_math(local, local)
+    assert out == local
+    assert lost == 2
+
+
+def test_a_poisoned_file_can_be_pulled_again():
+    """End to end: the lossy pull that poisons the file, then the next pull.
+
+    Built the way the failure actually arose rather than by hand — the second
+    pass is the one that used to raise, because the first pass is what leaves
+    the placeholder behind.
+    """
+    local = ("Notes on rates.\n\n"
+             "Let $I$ be insights and $T$ be time.\n\n"
+             "So $$Y = \\frac{I}{T}$$ is the yield.\n")
+
+    # Pull #1 restores cleanly; the file on disk then keeps a placeholder
+    # where an equation the reviewer edited in Docs could not be matched.
+    first = ("Notes on rates.\n\n"
+             f"Let {PLACEHOLDER} be insights and {PLACEHOLDER} be time.\n\n"
+             f"So {PLACEHOLDER} is the yield.\n")
+    once, lost_once = restore_math(first, local)
+    assert lost_once == 0 and once == local
+
+    poisoned = once.replace("$T$", PLACEHOLDER)
+    # The shape that breaks it: real math is still there, and the file holds
+    # one more equation POSITION than it holds spans — which is the count the
+    # alignment works in, and the count that used to run off the end.
+    spans = find_math_spans(poisoned)
+    assert spans
+    assert len(spans) + poisoned.count(PLACEHOLDER) > len(spans)
+
+    # Pull #2 over the poisoned file — this used to raise IndexError.
+    second = poisoned.replace("$I$", PLACEHOLDER).replace(
+        "$$Y = \\frac{I}{T}$$", PLACEHOLDER)
+    out, lost = restore_math(second, poisoned)
+
+    assert "$I$" in out
+    assert "$$Y = \\frac{I}{T}$$" in out
+    assert lost == 1  # only the stale gap
+    assert out == poisoned
+
+
+# --------------------------------------------------------------------------
 # Conformance with the parser that actually creates the equations
 # --------------------------------------------------------------------------
 

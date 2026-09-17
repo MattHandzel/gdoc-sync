@@ -440,17 +440,28 @@ def _run_sync(files, *, adopt, no_push, force, json_lines) -> None:
                   f"if that is really what you want.", file=sys.stderr)
             continue
 
-        outcome = reconcile(
-            path, doc_id,
-            render=lambda p, _d=doc_id: render_doc(_d, asset_path=p),
-            push=lambda p, *, expected_fingerprint=None: push_file(
-                p, yes=True, merged=True,
-                expected_fingerprint=expected_fingerprint),
-            allow_push=not (no_push or one_way),
-            adopt=adopt,
-            force=force,
-            say=(lambda *a: None) if json_lines else print,
-        )
+        try:
+            outcome = reconcile(
+                path, doc_id,
+                render=lambda p, _d=doc_id: render_doc(_d, asset_path=p),
+                push=lambda p, *, expected_fingerprint=None: push_file(
+                    p, yes=True, merged=True,
+                    expected_fingerprint=expected_fingerprint),
+                allow_push=not (no_push or one_way),
+                adopt=adopt,
+                force=force,
+                say=(lambda *a: None) if json_lines else print,
+            )
+        except Exception:
+            # A crash in one document's reconcile aborts the whole `--all`
+            # batch, and every frame in the traceback belongs to a library —
+            # nothing in it says which of ~50 files was being synced. Pinning
+            # the 2026-09-16 IndexError to a file took three crashed runs and a
+            # vault-wide grep. Name the file, then let the traceback through
+            # untouched.
+            print(f"ERROR while syncing {path} (doc {doc_id})",
+                  file=sys.stderr, flush=True)
+            raise
         if outcome.revision:
             set_revision(str(path), outcome.revision)
         if outcome.conflicted:

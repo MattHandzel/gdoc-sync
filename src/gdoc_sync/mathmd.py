@@ -222,13 +222,20 @@ def restore_math(markdown: str, existing: str) -> tuple[str, int]:
     # has a math span facing it. Counting those too is what keeps a single
     # malformed formula from unmatching the whole paragraph around it.
     normalised, is_placeholder = _normalise_pulled(markdown)
-    aligned = _align(normalised, _placeholderise(existing, spans))
+    local, span_of = _normalise_local(existing, spans)
+    aligned = _align(normalised, local)
     pairs, nth = {}, 0
     for position, placeholder in enumerate(is_placeholder):
         if not placeholder:
             continue
         if position in aligned:
-            pairs[nth] = aligned[position]
+            # The local ordinal the alignment picked may be a placeholder the
+            # file was already carrying rather than one of `spans` (see
+            # `_normalise_local`). There is no LaTeX behind one of those, so
+            # the pairing is dropped and the placeholder stays, counted.
+            span = span_of[aligned[position]]
+            if span is not None:
+                pairs[nth] = span
         nth += 1
 
     if len(spans) == len(placeholders):
@@ -241,8 +248,17 @@ def restore_math(markdown: str, existing: str) -> tuple[str, int]:
     out, cursor, unrestored = [], 0, 0
     for idx, m in enumerate(placeholders):
         out.append(markdown[cursor:m.start()])
-        if idx in pairs:
-            out.append(spans[pairs[idx]].text)
+        # The bounds test is a backstop, not an expectation: every pairing
+        # above is already an index into `spans`. It is here because the
+        # failure it guards is the worst one this module can have — an
+        # IndexError out of a render aborts the whole `sync --all` run, so one
+        # unmappable equation would stop every *other* document from syncing
+        # too. Degrading to "leave the placeholder and count it" keeps a
+        # miscount costing one visible gap, which is this module's whole
+        # contract.
+        pair = pairs.get(idx)
+        if pair is not None and 0 <= pair < len(spans):
+            out.append(spans[pair].text)
         else:
             out.append(m.group(0))
             unrestored += 1
@@ -288,21 +304,53 @@ def _fill_positionally(pairs: dict[int, int], count: int) -> None:
             claimed.add(idx)
 
 
-def _placeholderise(existing: str, spans: list[MathSpan]) -> str:
-    """Rewrite the local file with each math span reduced to :data:`PLACEHOLDER`.
+def _normalise_local(
+    existing: str, spans: list[MathSpan],
+) -> tuple[str, list[int | None]]:
+    """Reduce the local file to the same alphabet as pulled markdown.
 
     Alignment compares the local file against pulled markdown, and the pulled
     side has already lost its LaTeX. Diffing ``$a$`` against ``[equation]``
     would score every equation as a difference, so both sides are first put
     into the same alphabet.
+
+    Returns the rewritten text and, for each equation position in it, the index
+    into ``spans`` that position came from — or ``None`` where the local file
+    was **already** carrying a literal :data:`PLACEHOLDER`.
+
+    Those exist, and they are this module's own handwriting. A pull that cannot
+    match an equation writes the placeholder into the file on purpose, as a
+    visible gap. Counting only ``spans`` then made the local ordinals disagree
+    with what :func:`_paragraphs` counts — it counts placeholders, of which
+    there are now more than there are spans — so the alignment handed back a
+    local index past the end of ``spans`` and the next sync died with an
+    ``IndexError`` (seen 2026-09-16 on ``how-does-investing-work.md``: seven
+    equations, eight placeholders). That made a lossy pull *poison* the file:
+    one unmatched equation and every later run crashed, taking the rest of
+    ``sync --all`` down with it.
+
+    So the two kinds are tracked apart. A pulled equation that aligns onto a
+    real span is restored; one that aligns onto a placeholder that was already
+    there has no LaTeX to restore and stays a placeholder, exactly as it was.
     """
+    marks = [(s.start, s.end, i) for i, s in enumerate(spans)]
+    covered = [(s.start, s.end) for s in spans]
+    for m in _PLACEHOLDER_RE.finditer(existing):
+        # A placeholder inside a math span is that span's business, not a
+        # separate ordinal. (Code masking means this should not happen; the
+        # check costs nothing and keeps the two lists disjoint by construction.)
+        if any(start < m.end() and m.start() < end for start, end in covered):
+            continue
+        marks.append((m.start(), m.end(), None))
+    marks.sort(key=lambda mark: mark[0])
+
     out, cursor = [], 0
-    for span in spans:
-        out.append(existing[cursor:span.start])
+    for start, end, _ in marks:
+        out.append(existing[cursor:start])
         out.append(PLACEHOLDER)
-        cursor = span.end
+        cursor = end
     out.append(existing[cursor:])
-    return "".join(out)
+    return "".join(out), [span for _, _, span in marks]
 
 
 def _normalise_pulled(markdown: str) -> tuple[str, list[bool]]:
