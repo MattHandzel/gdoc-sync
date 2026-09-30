@@ -360,3 +360,99 @@ def test_no_anchored_comments_means_no_warning():
     assert anchored_push_warning([]) is None
     assert anchored_push_warning(
         [{"author": {"displayName": "C"}, "content": "c", "replies": []}]) is None
+
+
+# ---------------------------------------------------------------------------
+# Anchoring a quote that crosses markdown syntax (the orphaned-comment bug)
+# ---------------------------------------------------------------------------
+
+from gdoc_sync.anchors import plain_quote  # noqa: E402
+from gdoc_sync.comments import fetch_comments  # noqa: E402
+
+
+def _html_comment(quoted_html, author="Ada", content="note"):
+    c = _comment(quoted_html, author, content)
+    c["quotedFileContent"]["mimeType"] = "text/html"
+    return c
+
+
+def test_html_escaped_quote_is_unescaped_before_matching():
+    # Drive sends the selection as text/html: `wasn't` arrives as `wasn&#39;t`.
+    md = 'It wasn\'t out and "done" meant registered.\n'
+    out = embed_comments(md, [_html_comment(
+        "It wasn&#39;t out and &quot;done&quot; meant registered.")])
+    assert "orphaned" not in out
+    assert 'registered.{>>Ada: note<<}' in out
+
+
+def test_plain_quote_leaves_plain_text_alone():
+    assert plain_quote({"mimeType": "text/plain", "value": "a &amp; b"}) == "a &amp; b"
+    assert plain_quote({"mimeType": "text/html", "value": "a &amp; b<br>c"}) == "a & b\nc"
+
+
+def test_fetch_comments_hands_back_plain_quotes():
+    drive = FakeDrive([{
+        "id": "c1", "author": {"displayName": "Ada"}, "content": "x",
+        "quotedFileContent": {"mimeType": "text/html", "value": "I&#39;d go"},
+        "replies": [],
+    }])
+    [c] = fetch_comments(drive, "doc-1")
+    assert c["quotedFileContent"]["value"] == "I'd go"
+
+
+def test_quote_across_bold_and_link_anchors_after_the_link():
+    md = "I read **Who** and [the post](https://x.test/p) twice.\n"
+    out = embed_comments(md, [_comment("I read Who and the post", "Ada", "cite")])
+    assert "](https://x.test/p){>>Ada: cite<<} twice." in out
+
+
+def test_quote_ending_inside_bold_anchors_after_the_closing_marker():
+    md = "Plain **bold words** and more.\n"
+    out = embed_comments(md, [_comment("Plain bold words", "Ada", "hm")])
+    assert "**bold words**{>>Ada: hm<<} and more." in out
+
+
+def test_quote_spanning_heading_and_list_anchors_after_the_last_item():
+    md = ("### Mistakes\n\n- I designed interviews first.\n"
+          "- Nobody was in the pipeline.\n\nNext paragraph.\n")
+    quote = "Mistakes\nI designed interviews first.\nNobody was in the pipeline."
+    out = embed_comments(md, [_comment(quote, "Matt", "paragraphs please")])
+    assert "orphaned" not in out
+    assert "pipeline.{>>Matt: paragraphs please<<}\n" in out
+
+
+def test_quote_over_a_footnote_reference_and_curly_quotes():
+    md = "The club was analogous.[^1] It’s fine.\n\n[^1]: A note.\n"
+    out = embed_comments(md, [_comment("The club was analogous. It's fine.", "Ada", "ok")])
+    assert "It’s fine.{>>Ada: ok<<}" in out
+
+
+def test_quote_across_table_cells():
+    md = "| a | b |\n|---|---|\n| cell one | cell two |\n\nAfter.\n"
+    out = embed_comments(md, [_comment("a\nb\ncell one\ncell two", "Ada", "t")])
+    assert "cell two{>>Ada: t<<} |" in out
+
+
+def test_edited_middle_of_a_multiparagraph_quote_still_anchors():
+    md = ("First paragraph that the reviewer selected.\n\n"
+          "A middle paragraph rewritten since.\n\n"
+          "Last paragraph of the selection here.\n")
+    quote = ("First paragraph that the reviewer selected.\n"
+             "The middle paragraph as it used to read.\n"
+             "Last paragraph of the selection here.")
+    out = embed_comments(md, [_comment(quote, "Ada", "x")])
+    assert "selection here.{>>Ada: x<<}" in out
+
+
+def test_comment_never_lands_inside_code_or_a_link_target():
+    md = "Run `make test` now, see [docs](https://d.test).\n"
+    out = embed_comments(md, [_comment("Run make", "Ada", "a"),
+                              _comment("see do", "Bob", "b")])
+    assert "`make test`{>>Ada: a<<}" in out
+    assert "(https://d.test){>>Bob: b<<}" in out
+
+
+def test_existing_comment_between_words_does_not_break_the_match():
+    md = "keep this{>>Ada: old<<} sentence whole.\n"
+    out = embed_comments(md, [_comment("keep this sentence whole.", "Bob", "new")])
+    assert "whole.{>>Bob: new<<}" in out

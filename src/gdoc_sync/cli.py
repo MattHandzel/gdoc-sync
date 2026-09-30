@@ -81,6 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--flatten", action="store_true",
                    help="push a file with no [TAB] headers into a tabbed doc, "
                         "collapsing every tab into the first one")
+    p.add_argument("--replace", action="store_true",
+                   help="replace the whole body instead of editing only what "
+                        "changed (comments in the doc lose their anchors)")
 
     p = sub.add_parser("pull", help="pull a Google Doc as markdown (with comments as CriticMarkup)")
     p.add_argument("target", help="a linked local file, or a doc URL/ID")
@@ -274,7 +277,7 @@ def _dispatch(args: argparse.Namespace) -> None:
         _check_theme(args.theme)
         _api_guard(lambda: push(args.file, yes=args.yes, font=args.font,
                                 theme=args.theme, prune_tabs=args.prune_tabs,
-                                flatten=args.flatten))
+                                flatten=args.flatten, replace=args.replace))
 
     elif args.command == "pull":
         from .config import extract_doc_id_from_url, get_doc_id

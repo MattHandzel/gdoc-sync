@@ -59,7 +59,8 @@ class RemoteChanged(RuntimeError):
 def push(local_path: Path, *, yes: bool = False, font: str | None = None,
          theme: str | None = None, merged: bool = False,
          prune_tabs: bool = False, flatten: bool = False,
-         expected_fingerprint: str | None = None) -> str:
+         expected_fingerprint: str | None = None,
+         replace: bool = False) -> str:
     """Push a markdown file to its linked Google Doc.
 
     Returns the markdown that was actually pushed — the file's text with any
@@ -79,6 +80,9 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
     anything typed between that render and this upload would be overwritten
     with no conflict at all. Give it and a doc whose text has moved since
     raises :class:`RemoteChanged` before any comment action or upload.
+
+    ``replace`` skips the in-place update (see :mod:`.patch`) and replaces the
+    whole body the way every push used to, detaching every comment's anchor.
     """
     doc_id = get_doc_id(str(local_path))
     if not doc_id:
@@ -140,15 +144,17 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
     # queued up to fire again.
     markdown = _consume_applied_markers(local_path, markdown, result.applied)
 
-    # Both push paths replace the whole body, so every text-anchored thread
-    # is about to read "Original content deleted" in Docs. Reuse the fetch
+    # A push that has to replace a whole body leaves every text-anchored
+    # thread reading "Original content deleted" in Docs, so it says how many
+    # first. Only then is the comment list needed; reuse the fetch
     # apply_comment_actions already made rather than listing comments twice.
-    remote_comments = result.remote
-    if remote_comments is None:
-        remote_comments = fetch_comments(drive_service, doc_id)
-    anchored = anchored_push_warning(remote_comments)
-    if anchored:
-        print(f"  {anchored}")
+    def warn_anchors() -> None:
+        remote_comments = result.remote
+        if remote_comments is None:
+            remote_comments = fetch_comments(drive_service, doc_id)
+        anchored = anchored_push_warning(remote_comments)
+        if anchored:
+            print(f"  {anchored}")
 
     body_md = strip_comments(strip_frontmatter(markdown))
 
@@ -162,13 +168,16 @@ def push(local_path: Path, *, yes: bool = False, font: str | None = None,
 
     sections = split_tab_sections(body_md, say=print)
     if sections:
+        warn_anchors()
         _push_tabs(drive_service, docs_service, doc_id, sections,
                    resource_dir=local_path.parent, font=font, theme=theme,
                    prune_tabs=prune_tabs)
     else:
         _guard_flatten(doc, local_path, flatten)
         _push_docx(drive_service, docs_service, doc_id, body_md,
-                   resource_dir=local_path.parent, font=font, theme=theme)
+                   resource_dir=local_path.parent, font=font, theme=theme,
+                   in_place=not replace, warn_anchors=warn_anchors,
+                   expected_fingerprint=expected_fingerprint)
 
     new_rev = docs_service.documents().get(
         documentId=doc_id, fields="revisionId"
@@ -269,7 +278,9 @@ def _push_tabs(drive_service, docs_service, doc_id: str, sections, *,
 
 
 def _push_docx(drive_service, docs_service, doc_id: str, body_md: str, *,
-               resource_dir: Path, font: str | None, theme: str | None) -> None:
+               resource_dir: Path, font: str | None, theme: str | None,
+               in_place: bool = True, warn_anchors=lambda: None,
+               expected_fingerprint: str | None = None) -> None:
     # Styling goes into the docx's own style definitions where possible, so the
     # Google Doc's named styles carry the theme instead of having it painted
     # over the top (see refdoc). Falls back to API-side styling if that fails.
@@ -282,6 +293,18 @@ def _push_docx(drive_service, docs_service, doc_id: str, body_md: str, *,
         pandoc_to_docx(body_md, docx_path, resource_dir=resource_dir,
                        reference_doc=reference_doc,
                        highlight_style=highlight_style)
+
+        # Edit the doc in place when the change allows it, so every comment
+        # anchored to text that did not change keeps its anchor. Anything the
+        # in-place path cannot express falls through to the full replace.
+        if in_place:
+            if _push_in_place(drive_service, docs_service, doc_id, docx_path,
+                              font=font, theme=theme,
+                              baked=reference_doc is not None,
+                              expected_fingerprint=expected_fingerprint):
+                return
+        warn_anchors()
+
         media = MediaFileUpload(str(docx_path), mimetype=DOCX_MIME, resumable=False)
         drive_service.files().update(
             fileId=doc_id, media_body=media).execute(num_retries=NUM_RETRIES)
@@ -302,3 +325,35 @@ def _push_docx(drive_service, docs_service, doc_id: str, body_md: str, *,
                   + f" ({where})")
     except Exception as e:
         print(f"  Warning: could not apply styling: {e}")
+
+
+def _push_in_place(drive_service, docs_service, doc_id: str, docx_path: Path, *,
+                   font: str | None, theme: str | None, baked: bool,
+                   expected_fingerprint: str | None) -> bool:
+    """Update the doc by editing only what changed. False means "replace it".
+
+    :class:`RemoteChanged` propagates: the doc moved under the engine, which
+    retries on its next pass, exactly as for the full push.
+    """
+    from .patch import NotPatchable, build_target, patch_document
+
+    try:
+        target = build_target(drive_service, docs_service, docx_path,
+                              font=font, theme=theme, baked=baked, say=print)
+        result = patch_document(docs_service, doc_id, target,
+                                expected_text=expected_fingerprint, say=print)
+    except RemoteChanged:
+        raise
+    except NotPatchable as e:
+        print(f"  Cannot update in place ({e}); replacing the whole body.")
+        return False
+    except Exception as e:  # noqa: BLE001 — the full replace is always there
+        print(f"  In-place update failed ({e}); replacing the whole body.")
+        return False
+
+    if result.text_edits or result.style_edits:
+        print(f"  Updated in place: {result.text_edits} text edit(s), "
+              f"{result.style_edits} style fix(es); comments keep their anchors.")
+    else:
+        print("  The doc already matches; nothing to change.")
+    return True
