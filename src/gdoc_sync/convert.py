@@ -150,6 +150,9 @@ def doc_to_markdown(doc: dict, image_saver=None, *, start_number: int = 1,
     # iterations so a block split over several paragraphs does not become
     # several fences.
     in_code = False
+    # Width of the marker last used at each list level: a nested item has to
+    # be indented past its parent's marker, and "1. " is wider than "- ".
+    marker_widths: dict[int, int] = {}
 
     def close_code():
         nonlocal in_code, md_pos
@@ -185,7 +188,7 @@ def doc_to_markdown(doc: dict, image_saver=None, *, start_number: int = 1,
 
             close_code()
 
-            prefix = _paragraph_prefix(para, lists_meta)
+            prefix = _paragraph_prefix(para, lists_meta, marker_widths)
             text, runs_md = _convert_paragraph_elements(
                 para.get("elements", []), inline_objects, image_saver,
                 footnotes)
@@ -259,8 +262,15 @@ def doc_to_markdown(doc: dict, image_saver=None, *, start_number: int = 1,
     return result + "\n", offset_map
 
 
-def _paragraph_prefix(para: dict, lists_meta: dict) -> str:
-    """Determine markdown prefix for a paragraph (heading, bullet, etc.)."""
+def _paragraph_prefix(para: dict, lists_meta: dict,
+                      marker_widths: dict[int, int] | None = None) -> str:
+    """Determine markdown prefix for a paragraph (heading, bullet, etc.).
+
+    ``marker_widths`` carries the list context from paragraph to paragraph:
+    an item nested under ``1. parent`` needs three spaces, not two, or
+    markdown reads it as a new top-level list and the next push flattens it.
+    """
+    widths = marker_widths if marker_widths is not None else {}
     style_type = para.get("paragraphStyle", {}).get("namedStyleType", "")
 
     heading_map = {
@@ -272,12 +282,13 @@ def _paragraph_prefix(para: dict, lists_meta: dict) -> str:
         "HEADING_6": "###### ",
     }
     if style_type in heading_map:
+        widths.clear()
         return heading_map[style_type]
 
     bullet = para.get("bullet")
     if bullet:
         nesting = bullet.get("nestingLevel", 0)
-        indent = "  " * nesting
+        indent = " " * sum(widths.get(level, 2) for level in range(nesting))
         list_id = bullet.get("listId", "")
         list_props = lists_meta.get(list_id, {}).get("listProperties", {})
         nesting_levels = list_props.get("nestingLevels", [])
@@ -289,8 +300,12 @@ def _paragraph_prefix(para: dict, lists_meta: dict) -> str:
                 is_ordered = True
 
         marker = "1." if is_ordered else "-"
+        widths[nesting] = len(marker) + 1
+        for deeper in [level for level in widths if level > nesting]:
+            del widths[deeper]
         return f"{indent}{marker} "
 
+    widths.clear()
     return ""
 
 
@@ -359,7 +374,7 @@ def _convert_paragraph_elements(
     plain_parts = []
     md_parts = []
 
-    for elem in elements:
+    for elem in _merge_runs(elements):
         text_run = elem.get("textRun")
         if not text_run:
             # An equation arrives as a bare `{"equation": {}}` — the API
@@ -379,6 +394,13 @@ def _convert_paragraph_elements(
             ref = elem.get("footnoteReference")
             if ref is not None:
                 md_parts.append(_footnote_marker(ref, footnotes))
+                continue
+
+            # A `---` line imports as a paragraph holding only this. Skipped,
+            # it vanished from the file on pull and from the doc on the next
+            # push.
+            if "horizontalRule" in elem:
+                md_parts.append("---")
                 continue
 
             obj_id = elem.get("inlineObjectElement", {}).get("inlineObjectId")
@@ -439,6 +461,36 @@ def _convert_paragraph_elements(
     return "".join(plain_parts), "".join(md_parts)
 
 
+def _markdown_style(style: dict) -> tuple:
+    """The part of a text style that shows up in markdown."""
+    return ((style.get("link") or {}).get("url"), _is_mono(style),
+            bool(style.get("bold")), bool(style.get("italic")),
+            bool(style.get("strikethrough")))
+
+
+def _merge_runs(elements: list[dict]) -> list[dict]:
+    """Adjacent text runs that would be written the same way, as one run.
+
+    Docs splits a run wherever *any* property differs, including ones
+    markdown cannot express (a colour stated outright versus inherited, a
+    font size). Written run by run, one link became ``[just did the
+    reading](u)[myself](u)`` — two links, and the space between them gone.
+    """
+    out: list[dict] = []
+    for elem in elements:
+        run = elem.get("textRun")
+        prev = out[-1].get("textRun") if out else None
+        if (run is not None and prev is not None
+                and _markdown_style(run.get("textStyle", {}))
+                == _markdown_style(prev.get("textStyle", {}))):
+            out[-1] = {"textRun": {
+                "content": prev.get("content", "") + run.get("content", ""),
+                "textStyle": prev.get("textStyle", {})}}
+            continue
+        out.append(elem)
+    return out
+
+
 def _convert_table(table: dict, footnotes: _Footnotes | None = None) -> str:
     """Convert a Google Docs table to markdown pipe table."""
     rows = table.get("tableRows", [])
@@ -478,9 +530,10 @@ def markdown_to_requests(md_text: str) -> list[dict]:
     Strategy: delete all content, insert plain text, then apply formatting.
     Requests are returned in the order they should be sent.
     """
-    # Strip CriticMarkup comments
+    # Strip CriticMarkup comments and the highlights around what they selected
     import re
     clean = re.sub(r"\{>>.*?<<\}", "", md_text)
+    clean = clean.replace("{==", "").replace("==}", "")
 
     # Convert markdown to plain text + collect formatting ranges
     lines = clean.split("\n")

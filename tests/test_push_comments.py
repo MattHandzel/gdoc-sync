@@ -59,9 +59,15 @@ def harness(tmp_path, monkeypatch, capsys):
     docs = FakeDocs()
     monkeypatch.setattr(push_mod, "get_services", lambda: (drive, docs))
 
+    # Stands in for a push that had to replace the whole body, which is the
+    # case that warns about anchors (see test_in_place_push_does_not_warn).
     uploaded: list[str] = []
-    monkeypatch.setattr(push_mod, "_push_docx",
-                        lambda *a, **kw: uploaded.append(a[3]))
+
+    def full_replace(*a, **kw):
+        kw["warn_anchors"]()
+        uploaded.append(a[3])
+
+    monkeypatch.setattr(push_mod, "_push_docx", full_replace)
 
     # Recording a real baseline re-renders the doc, which needs OAuth.
     from gdoc_sync import sync
@@ -158,8 +164,32 @@ def test_push_lists_comments_at_most_once(harness):
     assert [c[0] for c in harness.drive.log].count("comments.list") == 1
 
 
-def test_push_without_markers_still_warns_and_lists_once(tmp_path, monkeypatch,
-                                                        capsys):
+def test_full_replace_without_markers_still_warns_and_lists_once(
+        tmp_path, monkeypatch, capsys):
+    path = tmp_path / "plain.md"
+    path.write_text("# Title\n\nquoted words are here.\n")
+    config.set_doc_id(path, "doc-1", revision_id="rev-1")
+
+    from gdoc_sync import sync
+
+    drive = FakeDrive([_remote("Alice", "tighten this")])
+    monkeypatch.setattr(push_mod, "get_services", lambda: (drive, FakeDocs()))
+    monkeypatch.setattr(push_mod, "_push_docx",
+                        lambda *a, **kw: kw["warn_anchors"]())
+    monkeypatch.setattr(sync, "record_sync_baseline", lambda *a, **kw: True)
+
+    returned = push_mod.push(path)
+
+    assert returned == path.read_text()
+    assert drive.writes == []
+    assert [c[0] for c in drive.log].count("comments.list") == 1
+    assert "1 anchored comment(s) will lose their anchor" in capsys.readouterr().out
+
+
+def test_in_place_push_does_not_warn_or_list_comments(tmp_path, monkeypatch,
+                                                      capsys):
+    """An in-place update leaves anchors alone, so there is nothing to warn
+    about and no reason to fetch the comment list at all."""
     path = tmp_path / "plain.md"
     path.write_text("# Title\n\nquoted words are here.\n")
     config.set_doc_id(path, "doc-1", revision_id="rev-1")
@@ -171,9 +201,15 @@ def test_push_without_markers_still_warns_and_lists_once(tmp_path, monkeypatch,
     monkeypatch.setattr(push_mod, "_push_docx", lambda *a, **kw: None)
     monkeypatch.setattr(sync, "record_sync_baseline", lambda *a, **kw: True)
 
-    returned = push_mod.push(path)
+    push_mod.push(path)
 
-    assert returned == path.read_text()
-    assert drive.writes == []
-    assert [c[0] for c in drive.log].count("comments.list") == 1
-    assert "1 anchored comment(s) will lose their anchor" in capsys.readouterr().out
+    assert [c[0] for c in drive.log].count("comments.list") == 0
+    assert "lose their anchor" not in capsys.readouterr().out
+
+
+def test_replace_flag_skips_the_in_place_update(harness, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(push_mod, "_push_docx",
+                        lambda *a, **kw: seen.update(kw))
+    push_mod.push(harness.path, replace=True)
+    assert seen["in_place"] is False

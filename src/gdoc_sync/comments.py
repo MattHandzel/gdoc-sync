@@ -4,34 +4,102 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from typing import NamedTuple
 
+from .anchors import docx_comment_ranges, find_ranges, highlight_pieces, plain_quote, project
 from .convert import OffsetMapping
 from .services import NUM_RETRIES
 
 
-def fetch_comments(drive_service, file_id: str) -> list[dict]:
-    """Fetch all unresolved comments from a Google Doc via Drive API."""
+def fetch_comments(drive_service, file_id: str, *, quotes: bool = True) -> list[dict]:
+    """Fetch all unresolved comments from a Google Doc via Drive API.
+
+    With ``quotes``, each comment's quote is replaced by what it covers in
+    the doc *now*, read from the doc's .docx export (see :func:`_live_quotes`).
+        """
     comments = []
     page_token = None
 
     while True:
         response = drive_service.comments().list(
             fileId=file_id,
-            fields="comments(id,content,author/displayName,quotedFileContent/value,anchor,resolved,replies(content,author/displayName)),nextPageToken",
+            fields="comments(id,content,author/displayName,quotedFileContent(mimeType,value),anchor,resolved,replies(content,author/displayName)),nextPageToken",
             includeDeleted=False,
             pageToken=page_token,
         ).execute(num_retries=NUM_RETRIES)
 
         for comment in response.get("comments", []):
             if not comment.get("resolved", False):
+                # Drive sends the selection HTML-escaped (`wasn&#39;t`); turn
+                # it into the plain text the doc actually shows, once, here.
+                quoted = comment.get("quotedFileContent")
+                if quoted and quoted.get("value"):
+                    comment["quotedFileContent"] = {
+                        "mimeType": "text/plain", "value": plain_quote(quoted)}
                 comments.append(comment)
 
         page_token = response.get("nextPageToken")
         if not page_token:
             break
 
+    if quotes:
+        _live_quotes(drive_service, file_id, comments)
     return comments
+
+
+# Set on a comment whose "quote" is only where it sits, not what it selected
+# (left at a cursor): it is placed there, and nothing is highlighted.
+POINT_KEY = "_gdoc_sync_point"
+# Set on a comment that is still open but no longer attached to any text in
+# the doc, because everything it selected was deleted. Google Docs shows it
+# with no highlight; the markdown lists it at the end, with what it was on.
+ORPHAN_KEY = "_gdoc_sync_orphaned"
+
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _live_quotes(drive_service, file_id: str, comments: list[dict]) -> None:
+    """Set each anchored comment's quote to the text it covers in the doc now.
+
+    Drive's ``quotedFileContent`` is a snapshot of the selection taken when
+    the comment was made, and it never changes. The anchor itself does: it
+    grows over words typed inside it and shrinks as its words are deleted,
+    and Google Docs highlights whatever it covers today. Placing a comment by
+    the snapshot highlights the wrong words once the text is edited, or none.
+
+    The doc's .docx export carries the live anchors, as ``commentRangeStart``
+    / ``commentRangeEnd`` around the covered runs, so it is fetched once and
+    each comment takes its quote from there. A comment the export has no
+    range for is attached to nothing (its text is gone; Docs counts it in no
+    tab) and is marked orphaned. If the export fails, the snapshots stand.
+    """
+    anchored = [c for c in comments if c.get("anchor")]
+    if not anchored:
+        return
+    try:
+        data = drive_service.files().export(
+            fileId=file_id, mimeType=_DOCX_MIME).execute(num_retries=NUM_RETRIES)
+        ranges = docx_comment_ranges(data)
+    except Exception:  # noqa: BLE001 — the snapshots are still usable
+        return
+    for comment in anchored:
+        author = (comment.get("author") or {}).get("displayName", "")
+        want = _norm(comment.get("content", ""))
+        snapshot = plain_quote(comment.get("quotedFileContent"))
+        same = [i for i, (who, text, covered, _) in enumerate(ranges)
+                if who == author and _norm(text) == want and covered.strip()]
+        if not same:
+            comment[ORPHAN_KEY] = True
+            continue
+        # Two comments can say the same thing ("too long"); the one whose
+        # range reads most like this comment's snapshot is this comment's.
+        best = max(same, key=lambda i: SequenceMatcher(
+            None, _norm(ranges[i][2]), _norm(snapshot), autojunk=False).ratio())
+        _, _, covered, point = ranges.pop(best)
+        comment["quotedFileContent"] = {"mimeType": "text/plain", "value": covered}
+        if point:
+            comment[POINT_KEY] = True
 
 
 def embed_comments(
@@ -41,61 +109,121 @@ def embed_comments(
 ) -> str:
     """Insert CriticMarkup annotations into markdown for each comment.
 
-    Uses quotedFileContent to find the anchor position in markdown text.
-    Falls back to appending at end if anchor can't be found.
+    The text a comment selected is wrapped in ``{==...==}`` and the comment
+    follows it, the way Google Docs shows it::
+
+        The {==quick brown fox==}{>>Ada: nice phrase<<} jumps.
+
+    A selection is not always one stretch of the file. One that spans
+    paragraphs, table cells or list items becomes one highlight per block;
+    one whose middle was edited since keeps a highlight on each part that is
+    still there. Either way the comment follows the last piece::
+
+        {==First paragraph.==}
+
+        {==Last paragraph.==}{>>Ada: both of these<<}
+
+    Highlights never nest: where two comments' selections overlap, the
+    highlight is cut at each comment instead. A comment left at a cursor, or
+    a doc-level note, is placed with nothing highlighted.
+
+    The quote is the doc's plain text and the markdown is not, so the search
+    runs over what a reader sees of the markdown (see :mod:`.anchors`) rather
+    than its raw source; a comment is appended at the end as orphaned only
+    when no recognisable part of its quote is left anywhere in the file, or
+    it has no quote at all.
     """
     if not comments:
         return markdown
 
-    # Build list of (position_in_md, criticmarkup_string) sorted by position desc
-    insertions: list[tuple[int, str]] = []
+    n = len(markdown)
+    covered = bytearray(n)
+    markers: dict[int, list[str]] = {}
+    orphans: list[str] = []
+    projection = None
 
     for comment in comments:
-        quoted = comment.get("quotedFileContent", {}).get("value", "")
+        quoted = plain_quote(comment.get("quotedFileContent"))
+        point = bool(comment.get(POINT_KEY))
+        if not quoted:
+            # A doc-level comment made with `{>>comment: ...<<}` goes back
+            # after the line it was written on.
+            m = _CONTEXT_RE.match(comment.get("content", ""))
+            quoted = project(m.group(1)).text if m else ""
+            point = True
         author = comment.get("author", {}).get("displayName", "Unknown")
-        content = comment.get("content", "")
+        cm = _format_comment(author, comment.get("content", ""),
+                             comment.get("replies", []))
 
-        # Build the CriticMarkup string
-        cm = _format_comment(author, content, comment.get("replies", []))
+        pieces: list[tuple[int, int]] = []
+        pos = None
+        if quoted and not comment.get(ORPHAN_KEY):
+            if projection is None:
+                projection = project(markdown)
+            for start, end in find_ranges(projection, quoted):
+                pieces += highlight_pieces(projection, start, end)
+                pos = end
+            if pos is None:
+                # Literal text the projection drops as markup, like a quote
+                # that itself contains `<!-- ... -->`.
+                at = markdown.find(quoted)
+                pos = at + len(quoted) if at != -1 else None
+        if pos is None:
+            orphans.append(f"\n\n{_orphan_note(quoted)}{cm}")
+            continue
+        if not point and pieces:
+            for start, end in pieces:
+                covered[start:end] = b"\x01" * (end - start)
+            pos = pieces[-1][1]
+        markers.setdefault(pos, []).append(cm)
 
-        if quoted:
-            # Find the quoted text in markdown
-            pos = markdown.find(quoted)
-            if pos != -1:
-                # Insert after the quoted text
-                insert_at = pos + len(quoted)
-                insertions.append((insert_at, cm))
-                continue
+    out: list[str] = []
+    lit = False
+    for i in range(n + 1):
+        here = markers.get(i)
+        if here:
+            if lit:
+                out.append("==}")
+                lit = False
+            out.extend(here)
+        want = i < n and covered[i]
+        if want and not lit:
+            out.append("{==")
+            lit = True
+        elif lit and not want:
+            out.append("==}")
+            lit = False
+        if i < n:
+            out.append(markdown[i])
+    return "".join(out) + "".join(orphans)
 
-            # Try case-insensitive or normalized search
-            pos = _fuzzy_find(markdown, quoted)
-            if pos is not None:
-                insertions.append((pos, cm))
-                continue
 
-        # Fallback: append as orphaned comment at end
-        insertions.append((len(markdown), f"\n\n<!-- orphaned comment -->{cm}"))
-
-    # Sort by position descending so insertions don't shift later positions
-    insertions.sort(key=lambda x: x[0], reverse=True)
-
-    for pos, cm_text in insertions:
-        markdown = markdown[:pos] + cm_text + markdown[pos:]
-
-    return markdown
+def _orphan_note(quoted: str) -> str:
+    """``<!-- orphaned comment ... -->``, naming the text it was on if known."""
+    if not quoted:
+        return "<!-- orphaned comment -->"
+    was = " ".join(quoted.split()).replace("--", "–")
+    if len(was) > 200:
+        was = was[:199] + "…"
+    return f"<!-- orphaned comment, was on: “{was}” -->"
 
 
 def strip_comments(markdown: str) -> str:
     """Remove comment annotations so they don't leak into a pushed doc.
 
-    Strips both CriticMarkup comments ({>>...<<}) and HTML comments
+    Strips CriticMarkup comments ({>>...<<}), the highlight delimiters around
+    the text they selected ({==...==}, text kept), and HTML comments
     (<!-- ... -->), the latter covering the `<!-- orphaned comment -->` markers
     that embed_comments() inserts when a pulled comment's anchor can't be found.
     """
-    import re
     md = re.sub(r"\{>>.*?<<\}", "", markdown, flags=re.DOTALL)
     md = re.sub(r"<!--.*?-->", "", md, flags=re.DOTALL)
-    return md
+    return strip_highlights(md)
+
+
+def strip_highlights(markdown: str) -> str:
+    """Drop the ``{==`` / ``==}`` around highlighted text, keeping the text."""
+    return markdown.replace("{==", "").replace("==}", "")
 
 
 # A display name is *remote, attacker-controlled text*. It lands at the very
@@ -162,36 +290,6 @@ def _format_comment(author: str, content: str, replies: list[dict]) -> str:
     return "{>>" + " | ".join(parts) + "<<}"
 
 
-def _fuzzy_find(markdown: str, quoted: str) -> int | None:
-    """Try to find quoted text with normalized whitespace."""
-    import re
-    # Normalize whitespace in both
-    norm_md = re.sub(r"\s+", " ", markdown)
-    norm_q = re.sub(r"\s+", " ", quoted.strip())
-
-    pos = norm_md.find(norm_q)
-    if pos == -1:
-        return None
-
-    # Map back to original markdown position (approximate)
-    # Count characters up to pos in normalized, map to original
-    orig_pos = 0
-    norm_pos = 0
-    for ch in markdown:
-        if norm_pos >= pos + len(norm_q):
-            break
-        if norm_pos >= pos and orig_pos == 0:
-            return orig_pos + len(quoted)
-        if ch.isspace():
-            if norm_pos == 0 or not markdown[orig_pos - 1].isspace():
-                norm_pos += 1
-        else:
-            norm_pos += 1
-        orig_pos += 1
-
-    return orig_pos
-
-
 # ---------------------------------------------------------------------------
 # Comment actions written in markdown (reply / resolve / new comment)
 # ---------------------------------------------------------------------------
@@ -207,6 +305,8 @@ def _fuzzy_find(markdown: str, quoted: str) -> int | None:
 #                                  comment quoting the preceding line
 
 _SPAN_RE = re.compile(r"\{>>(.*?)<<\}", re.DOTALL)
+# How a `{>>comment: ...<<}` doc-level comment records where it was written.
+_CONTEXT_RE = re.compile(r"Re: “(.+?)”\n\n", re.DOTALL)
 _ACTION_RE = re.compile(
     r"^\s*(reply|resolve|comment)\s*(?::\s*(.*))?\s*$",
     re.DOTALL | re.IGNORECASE,
@@ -236,7 +336,13 @@ def parse_comment_actions(markdown: str) -> list[dict]:
         context = ""
         if kind == "comment":
             before = _SPAN_RE.sub("", markdown[: m.start()]).rstrip()
-            context = before.rsplit("\n", 1)[-1].strip()[-120:]
+            lit = re.search(r"\{==((?:(?!\{==).)*?)==\}$", before, re.DOTALL)
+            if lit:
+                # `{==these words==}{>>comment: ...<<}` quotes exactly them.
+                context = " ".join(lit.group(1).split())[-500:]
+            else:
+                before = strip_highlights(before)
+                context = before.rsplit("\n", 1)[-1].strip()[-120:]
         actions.append({
             "type": kind,
             "text": text,
@@ -310,7 +416,7 @@ def apply_comment_actions(drive_service, doc_id: str,
     if not actions:
         return CommentActionResult([], [], None)
 
-    remote = fetch_comments(drive_service, doc_id)
+    remote = fetch_comments(drive_service, doc_id, quotes=False)
     results: list[str] = []
     applied: list[tuple[int, int]] = []
 

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Comments highlight what they select
+
+- **The selected text is marked, not just the spot after it.** A pulled
+  comment now reads `{==selected text==}{>>Author: comment<<}`. A selection
+  over paragraphs, list items or table cells, or one whose middle no longer
+  exists, gets one highlight per piece with the comment after the last.
+  Overlapping selections are cut at each comment rather than nested. The
+  `{==`/`==}` delimiters are stripped on push, create and diff, and a
+  `{>>comment: ...<<}` written right after a highlight quotes exactly it.
+- **Comments sit where Docs shows them now.** Drive's quote for a comment is
+  a snapshot of the selection when it was made and never changes; the anchor
+  itself follows edits. Each pull now reads the live ranges from the doc's
+  .docx export (one extra request when the doc has anchored comments), so a
+  rewritten sentence is highlighted whole instead of in fragments, and a
+  comment whose text was deleted is listed as orphaned (with what it was on)
+  instead of being matched to leftover words. If the export fails, the
+  snapshots are used as before.
+- **Comments left at a cursor are placed.** Drive reports no quote for them,
+  so they always ended up orphaned at the end of the file.
+- **A literal `[^7]` in the doc no longer breaks matching** of a selection
+  that includes it.
+
 ### The same state file on Linux and macOS
 
 - **Links made on one machine were invisible on the other.** The state file
