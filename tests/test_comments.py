@@ -1,6 +1,12 @@
 """Comment embedding (CriticMarkup), stripping, and anchor fallback."""
 
-from gdoc_sync.comments import _format_comment, embed_comments, strip_comments
+from gdoc_sync.comments import (
+    POINT_KEY,
+    _format_comment,
+    embed_comments,
+    parse_comment_actions,
+    strip_comments,
+)
 
 
 def _comment(quoted, author, content, replies=()):
@@ -17,7 +23,7 @@ def _comment(quoted, author, content, replies=()):
 def test_embed_anchors_after_quoted_text():
     md = "Intro line.\nThe quick brown fox jumps.\nOutro.\n"
     out = embed_comments(md, [_comment("quick brown fox", "Ada", "nice phrase")])
-    assert "fox{>>Ada: nice phrase<<}" in out
+    assert "The {==quick brown fox==}{>>Ada: nice phrase<<} jumps." in out
 
 
 def test_embed_includes_replies():
@@ -30,7 +36,7 @@ def test_embed_orphan_falls_back_to_end():
     md = "Nothing matches.\n"
     out = embed_comments(md, [_comment("absent phrase zz", "Ada", "lost")])
     assert out.startswith("Nothing matches.")
-    assert "<!-- orphaned comment -->{>>Ada: lost<<}" in out
+    assert "<!-- orphaned comment, was on: “absent phrase zz” -->{>>Ada: lost<<}" in out
 
 
 def test_multiple_insertions_do_not_shift_each_other():
@@ -39,8 +45,8 @@ def test_multiple_insertions_do_not_shift_each_other():
         _comment("alpha", "A", "first"),
         _comment("delta", "B", "last"),
     ])
-    assert "alpha{>>A: first<<}" in out
-    assert "delta{>>B: last<<}" in out
+    assert "{==alpha==}{>>A: first<<}" in out
+    assert "{==delta==}{>>B: last<<}" in out
 
 
 def test_strip_comments_removes_criticmarkup_and_html():
@@ -60,7 +66,7 @@ def test_format_comment_sanitizes_delimiters_and_newlines():
 # Comment actions (reply / resolve / comment markers)
 # ---------------------------------------------------------------------------
 
-from gdoc_sync.comments import match_comment, parse_comment_actions  # noqa: E402
+from gdoc_sync.comments import match_comment  # noqa: E402
 
 
 def test_parse_actions_none_in_plain_pulled_comments():
@@ -382,7 +388,7 @@ def test_html_escaped_quote_is_unescaped_before_matching():
     out = embed_comments(md, [_html_comment(
         "It wasn&#39;t out and &quot;done&quot; meant registered.")])
     assert "orphaned" not in out
-    assert 'registered.{>>Ada: note<<}' in out
+    assert 'meant registered.==}{>>Ada: note<<}' in out
 
 
 def test_plain_quote_leaves_plain_text_alone():
@@ -403,13 +409,13 @@ def test_fetch_comments_hands_back_plain_quotes():
 def test_quote_across_bold_and_link_anchors_after_the_link():
     md = "I read **Who** and [the post](https://x.test/p) twice.\n"
     out = embed_comments(md, [_comment("I read Who and the post", "Ada", "cite")])
-    assert "](https://x.test/p){>>Ada: cite<<} twice." in out
+    assert "{==I read **Who** and [the post](https://x.test/p)==}{>>Ada: cite<<} twice." in out
 
 
 def test_quote_ending_inside_bold_anchors_after_the_closing_marker():
     md = "Plain **bold words** and more.\n"
     out = embed_comments(md, [_comment("Plain bold words", "Ada", "hm")])
-    assert "**bold words**{>>Ada: hm<<} and more." in out
+    assert "{==Plain **bold words**==}{>>Ada: hm<<} and more." in out
 
 
 def test_quote_spanning_heading_and_list_anchors_after_the_last_item():
@@ -418,19 +424,19 @@ def test_quote_spanning_heading_and_list_anchors_after_the_last_item():
     quote = "Mistakes\nI designed interviews first.\nNobody was in the pipeline."
     out = embed_comments(md, [_comment(quote, "Matt", "paragraphs please")])
     assert "orphaned" not in out
-    assert "pipeline.{>>Matt: paragraphs please<<}\n" in out
+    assert "### {==Mistakes==}\n\n- {==I designed interviews first.==}\n- {==Nobody was in the pipeline.==}{>>Matt: paragraphs please<<}\n" in out
 
 
 def test_quote_over_a_footnote_reference_and_curly_quotes():
     md = "The club was analogous.[^1] It’s fine.\n\n[^1]: A note.\n"
     out = embed_comments(md, [_comment("The club was analogous. It's fine.", "Ada", "ok")])
-    assert "It’s fine.{>>Ada: ok<<}" in out
+    assert "{==The club was analogous.[^1] It’s fine.==}{>>Ada: ok<<}" in out
 
 
 def test_quote_across_table_cells():
     md = "| a | b |\n|---|---|\n| cell one | cell two |\n\nAfter.\n"
     out = embed_comments(md, [_comment("a\nb\ncell one\ncell two", "Ada", "t")])
-    assert "cell two{>>Ada: t<<} |" in out
+    assert "| {==a==} | {==b==} |\n|---|---|\n| {==cell one==} | {==cell two==}{>>Ada: t<<} |" in out
 
 
 def test_edited_middle_of_a_multiparagraph_quote_still_anchors():
@@ -441,18 +447,230 @@ def test_edited_middle_of_a_multiparagraph_quote_still_anchors():
              "The middle paragraph as it used to read.\n"
              "Last paragraph of the selection here.")
     out = embed_comments(md, [_comment(quote, "Ada", "x")])
-    assert "selection here.{>>Ada: x<<}" in out
+    assert "{==First paragraph that the reviewer selected.==}\n\nA middle paragraph rewritten since.\n\n{==Last paragraph of the selection here.==}{>>Ada: x<<}" in out
 
 
 def test_comment_never_lands_inside_code_or_a_link_target():
     md = "Run `make test` now, see [docs](https://d.test).\n"
     out = embed_comments(md, [_comment("Run make", "Ada", "a"),
                               _comment("see do", "Bob", "b")])
-    assert "`make test`{>>Ada: a<<}" in out
-    assert "(https://d.test){>>Bob: b<<}" in out
+    assert "{==Run `make test`==}{>>Ada: a<<}" in out
+    assert "{==see [docs](https://d.test)==}{>>Bob: b<<}" in out
 
 
 def test_existing_comment_between_words_does_not_break_the_match():
     md = "keep this{>>Ada: old<<} sentence whole.\n"
     out = embed_comments(md, [_comment("keep this sentence whole.", "Bob", "new")])
-    assert "whole.{>>Bob: new<<}" in out
+    assert "sentence whole.==}{>>Bob: new<<}" in out
+
+
+# A comment left at a cursor, with no text selected ("add something here")
+
+def _docx(body_xml, comments_xml):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml", f"<w:document><w:body>{body_xml}</w:body></w:document>")
+        z.writestr("word/comments.xml", f"<w:comments>{comments_xml}</w:comments>")
+    return buf.getvalue()
+
+
+def _note(cid, author, text):
+    return (f'<w:comment w:id="{cid}" w:author="{author}">'
+            f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:comment>")
+
+
+def test_point_comment_covers_the_end_of_the_line_before_it():
+    from gdoc_sync.anchors import docx_comment_ranges
+    body = ('<w:p><w:r><w:t>Ask for referrals from the network.</w:t></w:r>'
+            '<w:commentRangeStart w:id="3"/><w:r><w:t xml:space="preserve"> </w:t></w:r>'
+            '<w:commentRangeEnd w:id="3"/></w:p>'
+            '<w:p><w:r><w:t>Written by founders.</w:t></w:r>'
+            '<w:commentRangeStart w:id="5"/></w:p><w:p>'
+            '<w:commentRangeEnd w:id="5"/><w:r><w:t>Next.</w:t></w:r></w:p>')
+    data = _docx(body, _note(3, "Matt", "add something here") + _note(5, "Matt", "ai here"))
+    assert docx_comment_ranges(data) == [
+        ("Matt", "add something here", "Ask for referrals from the network.", True),
+        ("Matt", "ai here", "Written by founders.", True),
+    ]
+
+
+def test_point_comment_is_placed_not_orphaned():
+    from gdoc_sync.anchors import docx_comment_ranges
+    body = ('<w:p><w:r><w:t>Ask for referrals from the network.</w:t></w:r>'
+            '<w:commentRangeStart w:id="3"/><w:commentRangeEnd w:id="3"/></w:p>')
+    (_, _, covered, point), = docx_comment_ranges(_docx(body, _note(3, "Matt", "more?")))
+    md = "Intro.\n\nAsk for referrals from the network.\n\nOutro.\n"
+    comment = _comment(covered, "Matt", "more?")
+    comment[POINT_KEY] = point
+    out = embed_comments(md, [comment])
+    assert "orphaned" not in out
+    assert "network.{>>Matt: more?<<}\n" in out
+
+    assert "{==" not in out  # nothing was selected, so nothing is highlighted
+
+
+def test_selected_text_is_a_range_not_the_line_before():
+    from gdoc_sync.anchors import docx_comment_ranges
+    body = ('<w:p><w:r><w:t xml:space="preserve">Keep </w:t></w:r>'
+            '<w:commentRangeStart w:id="1"/><w:r><w:t>these words</w:t></w:r>'
+            '<w:commentRangeEnd w:id="1"/><w:r><w:t xml:space="preserve"> only.</w:t></w:r></w:p>')
+    assert docx_comment_ranges(_docx(body, _note(1, "Ada", "x"))) == [
+        ("Ada", "x", "these words", False)]
+
+
+# Highlighting the selected text, contiguous or not
+
+def test_partly_rewritten_selection_highlights_each_surviving_part():
+    md = ("We decided it made more sense to first lock in funding before we put "
+          "anyone through the hiring process we had designed.\n")
+    quote = ("We decided it made more sense to first lock in funding before putting "
+             "people through our hiring process we had designed.")
+    out = embed_comments(md, [_comment(quote, "Matt", "weird")])
+    assert out.startswith("{==We decided it made more sense to first lock in funding before")
+    assert "hiring process we had designed.==}{>>Matt: weird<<}" in out
+    assert out.count("{==") >= 2  # the rewritten words in between are not highlighted
+
+
+def test_overlapping_selections_never_nest():
+    md = "One two three four five six.\n"
+    out = embed_comments(md, [_comment("One two three four five six.", "Ada", "all"),
+                              _comment("three four", "Bob", "some")])
+    assert out == "{==One two three four==}{>>Bob: some<<}{== five six.==}{>>Ada: all<<}\n"
+    assert strip_comments(out) == md
+
+
+def test_doc_level_note_is_placed_without_a_highlight():
+    md = "A line we talked about.\n"
+    note = {"author": {"displayName": "Matt"}, "replies": [],
+            "content": "Re: “A line we talked about.”\n\nsource?"}
+    out = embed_comments(md, [note])
+    assert "{==" not in out
+    assert "about.{>>Matt: Re:" in out
+
+
+def test_highlights_never_reach_a_pushed_doc():
+    md = "{==Some **bold** text==}{>>Ada: hm<<} and {==more==}{>>Bob: ok<<}.\n"
+    assert strip_comments(md) == "Some **bold** text and more.\n"
+
+
+def test_highlighted_file_still_anchors_the_same_quote():
+    from gdoc_sync.anchors import find_anchor, project
+    md = "The {==quick brown fox==}{>>Ada: hm<<} jumps.\n"
+    pos = find_anchor(project(md), "quick brown fox jumps")
+    assert md[:pos].endswith("jumps")
+
+
+def test_new_comment_after_a_highlight_quotes_exactly_the_highlight():
+    md = "Intro line.\nWe {==took hiring==}{>>comment: say why<<} first.\n"
+    (action,) = parse_comment_actions(md)
+    assert action["type"] == "comment"
+    assert action["context"] == "took hiring"
+
+
+def test_new_comment_without_a_highlight_still_quotes_the_line():
+    md = "{==Earlier==}{>>Ada: x<<}\nWe took hiring first.{>>comment: say why<<}\n"
+    actions = [a for a in parse_comment_actions(md) if a["type"] == "comment"]
+    assert actions[0]["context"] == "We took hiring first."
+
+
+# Live anchors: where the comment is in the doc now, not where it was made
+
+class _Req:
+    def __init__(self, result):
+        self.result = result
+
+    def execute(self, **_):
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+class _FakeDrive:
+    """Drive with a comment list and a .docx export."""
+
+    def __init__(self, comments, docx):
+        self._comments, self._docx = comments, docx
+
+    def comments(self):
+        drive = self
+
+        class _C:
+            def list(self, **_):
+                return _Req({"comments": drive._comments})
+        return _C()
+
+    def files(self):
+        drive = self
+
+        class _F:
+            def export(self, **_):
+                return _Req(drive._docx)
+        return _F()
+
+
+def _drive_comment(author, content, quote, anchor="kix.a"):
+    return {"author": {"displayName": author}, "content": content, "anchor": anchor,
+            "quotedFileContent": {"mimeType": "text/html", "value": quote}}
+
+
+def _ranged(cid, text):
+    return (f'<w:commentRangeStart w:id="{cid}"/><w:r><w:t>{text}</w:t></w:r>'
+            f'<w:commentRangeEnd w:id="{cid}"/>')
+
+
+def test_a_comment_takes_its_live_range_not_the_snapshot():
+    from gdoc_sync.comments import fetch_comments
+    body = ("<w:p><w:r><w:t xml:space=\"preserve\">Then </w:t></w:r>"
+            + _ranged(1, "I handled the event pages, invitations, and logistics.") + "</w:p>")
+    drive = _FakeDrive(
+        [_drive_comment("Matt", "can be more detailed",
+                        "I handled the event pages, the invitations, and the logistics.")],
+        _docx(body, _note(1, "Matt", "can be more detailed")))
+    comments = fetch_comments(drive, "doc")
+    md = "Then I handled the event pages, invitations, and logistics.\n"
+    out = embed_comments(md, comments)
+    assert out == ("Then {==I handled the event pages, invitations, and logistics.==}"
+                   "{>>Matt: can be more detailed<<}\n")
+
+
+def test_a_comment_with_no_live_range_is_orphaned_even_if_its_words_remain():
+    from gdoc_sync.comments import ORPHAN_KEY, fetch_comments
+    body = "<w:p><w:r><w:t>A sentence. Another one.</w:t></w:r></w:p>"
+    drive = _FakeDrive([_drive_comment("Aris", "why?", "A sentence.")],
+                       _docx(body, ""))
+    (comment,) = fetch_comments(drive, "doc")
+    assert comment[ORPHAN_KEY]
+    out = embed_comments("A sentence. Another one.\n", [comment])
+    assert out.startswith("A sentence. Another one.\n")
+    assert "<!-- orphaned comment, was on: “A sentence.” -->{>>Aris: why?<<}" in out
+
+
+def test_identical_comments_each_get_their_own_range():
+    from gdoc_sync.comments import fetch_comments
+    body = ("<w:p>" + _ranged(1, "first long passage here") + "</w:p>"
+            "<w:p>" + _ranged(2, "second long passage there") + "</w:p>")
+    notes = _note(1, "Matt", "too long") + _note(2, "Matt", "too long")
+    drive = _FakeDrive([_drive_comment("Matt", "too long", "second long passage there"),
+                        _drive_comment("Matt", "too long", "first long passage here")],
+                       _docx(body, notes))
+    quotes = [c["quotedFileContent"]["value"] for c in fetch_comments(drive, "doc")]
+    assert quotes == ["second long passage there", "first long passage here"]
+
+
+def test_a_failed_export_keeps_the_snapshots():
+    from gdoc_sync.comments import ORPHAN_KEY, fetch_comments
+    drive = _FakeDrive([_drive_comment("Ada", "x", "It wasn&#39;t there")],
+                       RuntimeError("export failed"))
+    (comment,) = fetch_comments(drive, "doc")
+    assert comment["quotedFileContent"]["value"] == "It wasn't there"
+    assert ORPHAN_KEY not in comment
+
+
+def test_literal_footnote_reference_in_the_doc_still_matches_across_paragraphs():
+    md = "Opening line that is long enough.[^7]\n\nSecond paragraph goes on.\n\n[^7]: note\n"
+    quote = "Opening line that is long enough.[^7]\nSecond paragraph goes on."
+    out = embed_comments(md, [_comment(quote, "Ada", "x")])
+    assert out.startswith("{==Opening line that is long enough.[^7]==}\n\n"
+                          "{==Second paragraph goes on.==}{>>Ada: x<<}")

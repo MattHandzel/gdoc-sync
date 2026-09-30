@@ -48,6 +48,9 @@ _OPAQUE = (
     re.compile(r"<!--.*?-->", re.S),               # HTML comments
     re.compile(r"\[\^[^\]\s]+\](?!:)"),            # footnote references
 )
+# CriticMarkup highlight delimiters around the text a comment selected.
+_HIGHLIGHT = re.compile(r"\{==|==\}")
+_FOOTNOTE_REF = re.compile(r"\[\^[^\]\s]+\](?!:)")
 _IMAGE = re.compile(r"!\[[^\]\n]*\]\([^)\n]*\)")
 _LINK = re.compile(r"(?<!!)\[([^\]\n]*)\]\(([^)\n]*)\)")
 _CODE = re.compile(r"(`+)([^`\n]+?)\1")
@@ -73,7 +76,13 @@ def _fold_char(ch: str) -> str:
 
 
 def fold(text: str) -> str:
-    """The comparable form of a piece of plain text (a quote)."""
+    """The comparable form of a piece of plain text (a quote).
+
+    A footnote reference is dropped, as the projection drops it: a doc that
+    was pushed from markdown can hold ``[^7]`` as literal text, and pulled
+    back it is markup again.
+    """
+    text = _FOOTNOTE_REF.sub("", text)
     out = "".join(_fold_char(c) for c in text)
     return re.sub(r" +", " ", out).strip()
 
@@ -114,13 +123,19 @@ def _w_text(xml: str) -> str:
     return html.unescape("".join(out)).strip("\n")
 
 
-def docx_comment_ranges(data: bytes) -> list[tuple[str, str, str]]:
-    """``(author, comment text, covered text)`` for each comment in a .docx.
+def docx_comment_ranges(data: bytes) -> list[tuple[str, str, str, bool]]:
+    """``(author, comment text, covered text, is_point)`` per comment in a .docx.
 
     A comment that reached the doc through an imported Word file has an
     anchor but no ``quotedFileContent``: the Drive API never says what it
     covers. The doc's own .docx export does, as a ``commentRangeStart`` /
     ``commentRangeEnd`` pair around the covered runs.
+
+    A comment left at a cursor ("add something here") covers only a space or
+    a paragraph break, and Drive reports no quote for it either. Its covered
+    text is the end of the line before it instead, and ``is_point`` is set,
+    so it is placed right after the words it was left behind (without
+    highlighting them: nobody selected them) rather than orphaned.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         try:
@@ -136,9 +151,19 @@ def docx_comment_ranges(data: bytes) -> list[tuple[str, str, str]]:
                          rf'<w:commentRangeEnd w:id="{cid}"/>', body, re.S)
         if not span:
             continue
+        covered = _w_text(span.group(1))
+        point = not covered.strip()
+        if point:
+            covered = _line_before(body[:span.start()])
         out.append((html.unescape(attrs.get("author", "")), _w_text(m.group(2)),
-                    _w_text(span.group(1))))
+                    covered, point))
     return out
+
+
+def _line_before(xml: str, width: int = 60) -> str:
+    """The last ``width`` characters of the last non-blank line in ``xml``."""
+    lines = [line for line in _w_text(xml).split("\n") if line.strip()]
+    return lines[-1].strip()[-width:].lstrip() if lines else ""
 
 
 @dataclass
@@ -152,6 +177,28 @@ class _Projection:
     # (start, end, skippable): spans an anchor must not land inside. The
     # skippable ones are pure markup and are stepped over after an anchor.
     spans: list[tuple[int, int, bool]] = field(default_factory=list)
+
+    def start_of_match(self, start: int) -> int:
+        """Markdown offset where a match starting at projected ``start`` begins.
+
+        Backed out of any link or code span it would open inside, and over
+        emphasis markers right before it, so a highlight wraps ``**bold**``
+        and ``[a link](url)`` whole instead of cutting their syntax in two.
+        """
+        pos = self.src[start]
+        moved = True
+        while moved:
+            moved = False
+            for s, e, _ in self.spans:
+                if s < pos < e:
+                    pos, moved = s, True
+        while pos > 0 and self.markdown[pos - 1] in "*_~" and not self.markup[pos - 1]:
+            pos -= 1
+        return pos
+
+    def range_of(self, start: int, length: int) -> tuple[int, int]:
+        """Markdown ``(start, end)`` of ``length`` projected chars at ``start``."""
+        return self.start_of_match(start), self.end_of_match(start, length)
 
     def end_of_match(self, start: int, length: int) -> int:
         """Markdown offset just past a match of ``length`` projected chars."""
@@ -199,6 +246,9 @@ def project(markdown: str) -> _Projection:
             if free(m):
                 mark(m.start(), m.end())
                 proj.spans.append((m.start(), m.end(), True))
+    for m in _HIGHLIGHT.finditer(markdown):
+        if free(m):
+            mark(m.start(), m.end())
     for m in _IMAGE.finditer(markdown):
         if free(m):
             mark(m.start(), m.end())
@@ -250,42 +300,107 @@ def project(markdown: str) -> _Projection:
 
 
 def find_anchor(proj: _Projection, quote: str) -> int | None:
-    """Markdown offset right after ``quote``, or ``None`` if it cannot be placed.
+    """Markdown offset right after ``quote``, or ``None`` if it cannot be placed."""
+    ranges = find_ranges(proj, quote)
+    return ranges[-1][1] if ranges else None
 
-    Tries, in order: the whole quote; its last line, searched after where its
-    first line is (a selection spanning paragraphs whose middle was edited);
-    its first line; and finally the longest run of the quote that still
-    appears, provided that run is long enough to mean something.
+
+def find_ranges(proj: _Projection, quote: str) -> list[tuple[int, int]]:
+    """The markdown ``(start, end)`` ranges ``quote`` covers, in order.
+
+    One range when the quote is still there whole. Several when only parts
+    of it are: a selection over paragraphs whose middle was edited since, or
+    one whose words were partly rewritten. Empty when nothing recognisable
+    is left. Tries, in order: the whole quote; each of its lines, in order
+    (a line shorter than ``_MIN_PARTIAL`` is too unspecific to look for on
+    its own); and finally the runs of the quote that still appear around its
+    longest surviving one, provided that run is long enough to mean something.
     """
     q = fold(quote)
     if not q:
-        return None
+        return []
 
     hit = proj.text.find(q)
     if hit != -1:
-        return proj.end_of_match(hit, len(q))
+        return [proj.range_of(hit, len(q))]
 
     lines = [fold(ln) for ln in re.split(r"[\n\r\x0b]+", quote)]
     lines = [ln for ln in lines if len(ln) >= _MIN_PARTIAL]
     if len(lines) >= 2:
-        first = proj.text.find(lines[0])
-        after = first + len(lines[0]) if first != -1 else 0
-        for line in reversed(lines[1:]):
+        found, after = [], 0
+        for line in lines:
             at = proj.text.find(line, after)
             if at != -1:
-                return proj.end_of_match(at, len(line))
-        if first != -1:
-            return proj.end_of_match(first, len(lines[0]))
+                found.append(proj.range_of(at, len(line)))
+                after = at + len(line)
+        if found:
+            return found
 
-    return _longest_run(proj, q)
+    return _surviving_runs(proj, q)
 
 
-def _longest_run(proj: _Projection, q: str) -> int | None:
-    matcher = SequenceMatcher(None, proj.text, q, autojunk=False)
-    a, _, size = matcher.find_longest_match(0, len(proj.text), 0, len(q))
+def _surviving_runs(proj: _Projection, q: str) -> list[tuple[int, int]]:
+    text = proj.text
+    matcher = SequenceMatcher(None, text, q, autojunk=False)
+    a, _, size = matcher.find_longest_match(0, len(text), 0, len(q))
     if size < max(_MIN_PARTIAL * 2, int(len(q) * 0.4)):
-        return None
-    # Never end on the collapsed space between words.
-    while size and proj.text[a + size - 1] == " ":
-        size -= 1
-    return proj.end_of_match(a, size) if size else None
+        return []
+    # The rest of the quote can only have survived near its longest run.
+    lo, hi = max(0, a - 2 * len(q)), min(len(text), a + size + 2 * len(q))
+    blocks = SequenceMatcher(None, text[lo:hi], q, autojunk=False).get_matching_blocks()
+    out = []
+    for x, _, n in blocks:
+        start, end = lo + x, lo + x + n
+        if n < _MIN_PARTIAL and not start <= a < end:
+            continue
+        # Never start or end on the collapsed space between words.
+        while start < end and text[start] == " ":
+            start += 1
+        while end > start and text[end - 1] == " ":
+            end -= 1
+        if end > start:
+            out.append(proj.range_of(start, end - start))
+    return out
+
+
+def highlight_pieces(proj: _Projection, start: int, end: int) -> list[tuple[int, int]]:
+    """Split the markdown range ``start:end`` into pieces a highlight can wrap.
+
+    A ``{==...==}`` must not run over a paragraph break, a list marker, a
+    heading's ``#`` or a table's ``|``, or the markdown around it breaks. So
+    a range is cut at every line end, each line's block prefix is left out,
+    table rows are cut at their cell borders, and a piece with no visible
+    text in it is dropped.
+    """
+    md = proj.markdown
+    out: list[tuple[int, int]] = []
+    pos = start
+    while pos < end:
+        nl = md.find("\n", pos, end)
+        line_end = end if nl == -1 else nl
+        a = pos
+        if a == 0 or md[a - 1] == "\n":
+            for rx in (_LINE_PREFIX, _FOOTNOTE_DEF):
+                m = rx.match(md, a)
+                if m and m.end() <= line_end:
+                    a = m.end()
+        line_start = md.rfind("\n", 0, a) + 1
+        cuts = [a]
+        if md[line_start:line_end].lstrip().startswith("|"):
+            cuts += [i + 1 for i in range(a, line_end)
+                     if md[i] == "|" and not proj.markup[i] and not _in_span(proj, i)]
+        cuts.append(line_end + 1)
+        for s, e in zip(cuts, cuts[1:]):
+            e = min(e - 1, line_end)
+            while s < e and (md[s].isspace() or md[s] == "|"):
+                s += 1
+            while e > s and (md[e - 1].isspace() or md[e - 1] == "|"):
+                e -= 1
+            if any(not proj.markup[i] and not md[i].isspace() for i in range(s, e)):
+                out.append((s, e))
+        pos = line_end + 1
+    return out
+
+
+def _in_span(proj: _Projection, i: int) -> bool:
+    return any(s <= i < e for s, e, _ in proj.spans)

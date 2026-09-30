@@ -156,11 +156,36 @@ Three things worth knowing:
 
 ## Comments
 
-Pulled comments arrive anchored in your prose:
+Pulled comments arrive anchored in your prose, with the text they select
+highlighted the way Google Docs shows it:
 
 ```markdown
-The proposal hinges on the Q3 numbers{>>Maya Chen: source for these?<<}.
+The proposal hinges on {==the Q3 numbers==}{>>Maya Chen: source for these?<<}.
 ```
+
+A selection that isn't one stretch of your file gets one highlight per piece,
+with the comment after the last: a selection over several paragraphs, list
+items or table cells, for instance.
+
+```markdown
+{==Revenue grew 40%.==}
+
+{==Costs stayed flat.==}{>>Sam: both of these need a source<<}
+```
+
+The highlight follows what the comment covers in the doc *now* (read from the
+doc's .docx export), not the words it was made on, so after an edit it still
+matches what Docs highlights. Where two comments overlap, the highlight is cut
+at each comment instead of nesting. A comment left at a cursor, with nothing
+selected, is placed there with no highlight. A comment whose text was deleted
+from the doc entirely is listed at the end of the file, as Docs shows it with
+no highlight:
+
+```markdown
+<!-- orphaned comment, was on: “the old sentence” -->{>>Sam: too long<<}
+```
+
+Highlights and orphan notes are stripped from anything you push.
 
 Answer them without leaving your editor. Put a marker right after the pulled
 comment and push:
@@ -405,7 +430,8 @@ indentation stops at the first bullet.
   API saves but ignores comment anchors on Google Docs
   ([issue 292610078](https://issuetracker.google.com/issues/292610078)), so no
   third-party tool can highlight-comment a text range. That's why
-  `{>>comment: ...<<}` becomes a doc-level comment quoting your text, while
+  `{>>comment: ...<<}` becomes a doc-level comment quoting your text (just the
+  highlighted words if you write `{==these words==}{>>comment: ...<<}`), while
   replies and resolves (which the API supports) attach to the real thread.
 - **Push replaces the whole doc body.** Comment threads survive it but lose
   their anchor in the Docs UI until the next pull (the push tells you how

@@ -530,9 +530,10 @@ def markdown_to_requests(md_text: str) -> list[dict]:
     Strategy: delete all content, insert plain text, then apply formatting.
     Requests are returned in the order they should be sent.
     """
-    # Strip CriticMarkup comments
+    # Strip CriticMarkup comments and the highlights around what they selected
     import re
     clean = re.sub(r"\{>>.*?<<\}", "", md_text)
+    clean = clean.replace("{==", "").replace("==}", "")
 
     # Convert markdown to plain text + collect formatting ranges
     lines = clean.split("\n")
